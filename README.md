@@ -1,108 +1,225 @@
-# Moondream Station Helper
+# Moondream Invite Canvas
 
-This folder contains tools to drive a locally running [Moondream Station](https://moondream.ai/blog/moondream-station-m3-preview) service:
+High‑performance, Figma‑like canvas for building “invite” layouts by dropping images onto an infinite board, moving/resizing them, and saving everything locally.
 
-- `moondream_batch.py` – batch caption/query/detect photos via the REST API.
-- `webapp/` – lightweight Flask UI where you can drop an image, read the caption, and render bounding boxes (“segments”) over the photo.
+- **Frontend**: Next.js + PixiJS (WebGL)
+- **DB**: SQLite (with FTS5 search)
+- **Storage**: local filesystem under `data/`
+- **AI**: Moondream Station (local) or Hugging Face endpoint (optional worker)
 
-## 1. Start Moondream Station
+![Moondream Invite Canvas screenshot](docs/screenshot.png)
 
-1. Make sure the pip `bin` directory is on `PATH`:
+## Introduction
 
-   ```bash
-   export PATH="$HOME/Library/Python/3.9/bin:$PATH"
-   ```
+This repo is an MVP for a fast, responsive design surface:
 
-2. Launch the CLI (outside this sandbox so it can create `~/.moondream-station`):
+- Drop images onto the canvas (drag & drop)
+- Pan/zoom with a minimap
+- Select / multi‑select, move, resize, delete
+- Persist canvas layout and viewport per project
+- Store assets + thumbnails on disk
+- Search assets (filename + AI caption/tags)
+- Optional background worker to caption/tag images via Moondream
 
-   ```bash
-   moondream-station
-   ```
+## Quickstart (run the app)
 
-3. Inside the REPL:
-   - `models list` – inspect available models.
-   - `models switch <name>` – pick the one you want.
-   - `start` – spin up the REST API (defaults to `http://127.0.0.1:2020/v1`).
+Requirements:
 
-4. Optional sanity check from another terminal:
+- Node.js 20+
+- Python 3.10+ (only needed for Moondream / worker)
 
-   ```bash
-   curl -s http://127.0.0.1:2020/health
-   ```
-
-   You should see `{ "status": "ok", ... }` once the service is ready.
-
-## 2. Batch Photos With `moondream_batch.py`
-
-Run the helper script from this folder once the REST API is live:
+Install and run:
 
 ```bash
-python3 moondream_batch.py <files-or-folders> \
-  --function caption \
-  --length normal \
-  --output-dir captions
+cd web
+npm install
+npm run dev
 ```
 
-Key flags:
+Then open `http://localhost:3000`.
 
-- `--function` – model function to call (`caption`, `query`, `detect`, etc.).
-- `--question` – text prompt; sets both `question` and `object` payload fields.
-- `--length` – `short`, `normal`, or `long` caption hint (caption function only).
-- `--param key=value` – add arbitrary payload fields; repeat for multiple pairs.
-- `--output-dir path` – optional folder to store one `.txt` file per image.
-- `--endpoint URL` – change the base URL if you run the API on another host/port.
+> `npm run dev` starts both Next.js and `moondream-station` (if installed). You may need to type `start` inside the Moondream Station REPL to start the REST API.
 
-Examples:
+## Install Moondream Station (local)
+
+Install the `moondream-station` CLI so it’s available on your PATH.
+
+Recommended (via pipx):
 
 ```bash
-# Caption every image in a folder and save outputs next to the console text
-python3 moondream_batch.py ~/Pictures/new_shoot --function caption --length long --output-dir captions
-
-# Ask a question about a batch of photos
-python3 moondream_batch.py ~/Desktop/dropbox --function query --question "What product is featured?" --output-dir qna
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+pipx install moondream-station
 ```
 
-The script automatically walks directories, filters for common image extensions, avoids duplicates, and prints token stats when the API returns them. If a request fails it keeps going with the remaining images.
-
-## 3. Web Interface (Caption + Segment)
-
-Use the Flask UI when you want a friendly drag-and-drop experience with a live preview and bounding boxes drawn over the image:
+Or (via pip):
 
 ```bash
-cd webapp
-python3 -m venv .venv && source .venv/bin/activate  # optional but recommended
+python3 -m pip install --user moondream-station
+```
+
+Run it:
+
+```bash
+moondream-station
+```
+
+Inside the REPL:
+
+- `models list`
+- `models switch <name>`
+- `start` (defaults to `http://127.0.0.1:2020/v1`)
+
+Sanity check:
+
+```bash
+curl -s http://127.0.0.1:2020/health
+```
+
+## Optional: run the Moondream worker (caption/tags + embeddings)
+
+The worker polls the shared SQLite DB (`data/moondream.sqlite3`) for images with `asset_ai.status = 'pending'` and writes back:
+
+- `asset_ai.caption`
+- `asset_ai.tags_json` (best‑effort)
+- optional: caption embeddings + segmentation rows (schema exists)
+
+Setup:
+
+```bash
+cd worker
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python3 app.py  # runs on http://127.0.0.1:8080
+python moondream_worker.py
 ```
 
-Leave Moondream Station running on port 2020. The web UI will:
-
-1. Accept a dropped/uploaded image.
-2. Call `/v1/caption` for the caption (length selector in the UI).
-3. Optionally call `/v1/detect` if you provide a target object (e.g., “person”).
-4. Render translucent rectangles (“segments”) over the preview using the returned bounding boxes, plus show any errors inline if the backend can’t detect that object.
-
-If Moondream Station runs on a non-default URL, set `MOONDREAM_ENDPOINT` before launching Flask:
+Environment variables (examples):
 
 ```bash
-export MOONDREAM_ENDPOINT="http://127.0.0.1:3030"
-python3 app.py
+# Local Moondream Station
+export MOONDREAM_PROVIDER=local_station
+export MOONDREAM_ENDPOINT=http://127.0.0.1:2020
+
+# Hugging Face endpoint (generic adapter)
+# export MOONDREAM_PROVIDER=huggingface
+# export HF_ENDPOINT_URL="https://your-hf-endpoint"
+# export HF_TOKEN="..."
 ```
 
-## 4. One-Off Inference (Optional)
+## Repository structure
 
-Instead of batching or using the UI you can stay entirely inside the Moondream Station REPL:
+- `web/`: Next.js app (canvas UI, API routes, DB access layer)
+- `worker/`: Python worker for asynchronous Moondream processing
+- `moondream_batch.py`: standalone batch helper to hit a running Moondream Station REST API
+- `data/`: local dev data (SQLite DB + per-project assets/thumbs/previews)
 
-```bash
-infer caption /path/to/image.jpg normal
-infer query /path/to/image.png "What is happening?"
+## Mermaid: database schema (SQLite)
+
+```mermaid
+erDiagram
+  projects {
+    TEXT id PK
+    TEXT name
+    TEXT created_at
+    TEXT updated_at
+  }
+
+  assets {
+    TEXT id PK
+    TEXT project_id FK
+    TEXT original_name
+    TEXT mime_type
+    INTEGER byte_size
+    TEXT sha256
+    TEXT storage_path
+    TEXT storage_url
+    TEXT thumb_path
+    TEXT thumb_url
+    INTEGER width
+    INTEGER height
+    TEXT created_at
+  }
+
+  asset_ai {
+    TEXT asset_id PK, FK
+    TEXT caption
+    TEXT tags_json
+    TEXT status
+    TEXT model_version
+    TEXT updated_at
+  }
+
+  canvas_objects {
+    TEXT id PK
+    TEXT project_id FK
+    TEXT type
+    TEXT asset_id FK
+    REAL x
+    REAL y
+    REAL scale_x
+    REAL scale_y
+    REAL rotation
+    REAL width
+    REAL height
+    INTEGER z_index
+    TEXT props_json
+    TEXT created_at
+    TEXT updated_at
+  }
+
+  project_view {
+    TEXT project_id PK, FK
+    REAL world_x
+    REAL world_y
+    REAL zoom
+    TEXT updated_at
+  }
+
+  asset_search {
+    TEXT asset_id
+    TEXT project_id
+    TEXT original_name
+    TEXT caption
+    TEXT tags
+  }
+
+  asset_embeddings {
+    TEXT asset_id PK, FK
+    TEXT model
+    INTEGER dim
+    BLOB embedding
+    TEXT updated_at
+  }
+
+  asset_segments {
+    TEXT asset_id FK
+    TEXT tag
+    TEXT svg
+    TEXT bbox_json
+    TEXT updated_at
+  }
+
+  projects ||--o{ assets : has
+  assets ||--|| asset_ai : has
+  projects ||--o{ canvas_objects : has
+  assets ||--o{ canvas_objects : referenced_by
+  projects ||--|| project_view : has
+  projects ||--o{ asset_search : indexes
+  assets ||--|| asset_embeddings : embeds
+  assets ||--o{ asset_segments : segments
 ```
 
-Use whichever workflow fits your needs—everything ultimately hits the same local REST service.
+## Mermaid: app architecture
 
-
-## Todo
-[] aqua effect
-[] connect with moondream
-[] vector database
-[] double click to see full screen preview with meta data on the right
+```mermaid
+flowchart LR
+  U["Browser"] -->|HTTP| N["Next.js (web)"];
+  N --> UI["PixiJS Canvas UI"];
+  N --> API["API Routes"];
+  API --> DB[("SQLite: data/moondream.sqlite3")];
+  API --> FS[("Filesystem: data/projects/{projectId}/...")];
+  W["worker/moondream_worker.py"] --> DB;
+  W -->|HTTP| MS["Moondream Station (127.0.0.1:2020)"];
+  W -->|optional HTTP| HF["Hugging Face Endpoint"];
+```

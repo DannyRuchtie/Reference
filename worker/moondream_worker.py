@@ -25,6 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+_EMBEDDER = None
+_EMBEDDER_MODEL_NAME = None
+
 
 def repo_root_from_here() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -48,7 +51,13 @@ class ProviderError(Exception):
 
 
 class MoondreamProvider:
-    def caption_and_tags(self, image_path: str) -> Tuple[str, List[str]]:
+    def caption(self, image_path: str, length: str = "normal") -> str:
+        raise NotImplementedError
+
+    def detect(self, image_path: str, obj: str) -> Any:
+        raise NotImplementedError
+
+    def segment(self, image_path: str, obj: str) -> Any:
         raise NotImplementedError
 
     def model_version(self) -> str:
@@ -71,9 +80,9 @@ class LocalStationProvider(MoondreamProvider):
             data = base64.b64encode(f.read()).decode("ascii")
         return f"data:{mime};base64,{data}"
 
-    def caption_and_tags(self, image_path: str) -> Tuple[str, List[str]]:
+    def caption(self, image_path: str, length: str = "normal") -> str:
         url = f"{self.endpoint}/v1/caption"
-        body = {"stream": False, "length": "normal", "image_url": self._encode_image_data_url(image_path)}
+        body = {"stream": False, "length": length, "image_url": self._encode_image_data_url(image_path)}
         r = requests.post(url, json=body, timeout=180)
         if r.status_code >= 400:
             raise ProviderError(f"station caption failed: {r.status_code} {r.text}")
@@ -81,10 +90,23 @@ class LocalStationProvider(MoondreamProvider):
         caption = (data.get("caption") or data.get("text") or "").strip()
         if not caption:
             caption = json.dumps(data)
-        # MVP heuristic tags: split caption into keywords (very simple).
-        tags = [t.strip(" ,.!?;:()[]\"'").lower() for t in caption.split() if len(t) >= 4]
-        tags = sorted(list({t for t in tags if t}))
-        return caption, tags[:25]
+        return caption
+
+    def detect(self, image_path: str, obj: str) -> Any:
+        url = f"{self.endpoint}/v1/detect"
+        body = {"stream": False, "object": obj, "image_url": self._encode_image_data_url(image_path)}
+        r = requests.post(url, json=body, timeout=180)
+        if r.status_code >= 400:
+            raise ProviderError(f"station detect failed: {r.status_code} {r.text}")
+        return r.json()
+
+    def segment(self, image_path: str, obj: str) -> Any:
+        url = f"{self.endpoint}/v1/segment"
+        body = {"stream": False, "object": obj, "image_url": self._encode_image_data_url(image_path)}
+        r = requests.post(url, json=body, timeout=180)
+        if r.status_code >= 400:
+            raise ProviderError(f"station segment failed: {r.status_code} {r.text}")
+        return r.json()
 
     def model_version(self) -> str:
         return "moondream_station"
@@ -95,7 +117,7 @@ class HuggingFaceProvider(MoondreamProvider):
         self.endpoint_url = endpoint_url
         self.token = token
 
-    def caption_and_tags(self, image_path: str) -> Tuple[str, List[str]]:
+    def caption(self, image_path: str, length: str = "normal") -> str:
         # This is intentionally generic; different HF endpoints have different schemas.
         # You can adapt this to your specific endpoint contract.
         with open(image_path, "rb") as f:
@@ -124,10 +146,13 @@ class HuggingFaceProvider(MoondreamProvider):
 
         if not caption:
             caption = json.dumps(data)
+        return caption
 
-        tags = [t.strip(" ,.!?;:()[]\"'").lower() for t in caption.split() if len(t) >= 4]
-        tags = sorted(list({t for t in tags if t}))
-        return caption, tags[:25]
+    def detect(self, image_path: str, obj: str) -> Any:
+        raise ProviderError("detect is not supported for the huggingface provider in this worker")
+
+    def segment(self, image_path: str, obj: str) -> Any:
+        raise ProviderError("segment is not supported for the huggingface provider in this worker")
 
     def model_version(self) -> str:
         return "huggingface_endpoint"
@@ -234,6 +259,239 @@ def update_search_index(con: sqlite3.Connection, asset_id: str) -> None:
         (row["id"], row["project_id"], row["original_name"], row["caption"] or "", tags_text),
     )
 
+def _tokenize_candidates(text: str) -> List[str]:
+    # Very lightweight candidate extraction (MVP). We keep it deterministic and cheap.
+    # Note: detect will be the filter/ground-truth.
+    stop = {
+        "the",
+        "and",
+        "with",
+        "without",
+        "from",
+        "into",
+        "over",
+        "under",
+        "near",
+        "behind",
+        "front",
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "this",
+        "that",
+        "these",
+        "those",
+        "there",
+        "here",
+        "image",
+        "photo",
+        "picture",
+        "view",
+        "scene",
+        "very",
+        "more",
+        "most",
+        "some",
+        "many",
+        "few",
+        "one",
+        "two",
+        "three",
+    }
+    raw = (
+        text.lower()
+        .replace("\n", " ")
+        .replace("\t", " ")
+        .replace("/", " ")
+        .replace("\\", " ")
+    )
+    tokens = []
+    buf = []
+    for ch in raw:
+        if "a" <= ch <= "z" or ch == " ":
+            buf.append(ch)
+        else:
+            buf.append(" ")
+    for t in "".join(buf).split():
+        if len(t) < 3:
+            continue
+        if t in stop:
+            continue
+        tokens.append(t)
+    # Preserve rough relevance by first occurrence order, but de-dupe.
+    seen = set()
+    out = []
+    for t in tokens:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def _extract_detect_boxes(detect_response: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize Moondream detect responses into a list of boxes.
+    We keep this tolerant because response shapes can vary by model/version.
+    """
+    if not detect_response:
+        return []
+    data = detect_response
+    # Common shapes we attempt:
+    # - { "objects": [ {x,y,w,h,score?} ] }
+    # - { "detections": [ {box:{x,y,w,h}, score} ] }
+    # - { "boxes": [ [x1,y1,x2,y2], ... ] }
+    # - { "result": { ... } }
+    if isinstance(data, dict) and "result" in data:
+        data = data.get("result")
+    if isinstance(data, dict):
+        for key in ("objects", "detections", "boxes"):
+            if key in data:
+                data = data.get(key)
+                break
+    boxes: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                if all(k in item for k in ("x", "y", "w", "h")):
+                    boxes.append(
+                        {
+                            "x": float(item.get("x")),
+                            "y": float(item.get("y")),
+                            "w": float(item.get("w")),
+                            "h": float(item.get("h")),
+                            "score": item.get("score"),
+                        }
+                    )
+                    continue
+                if "box" in item and isinstance(item["box"], dict):
+                    b = item["box"]
+                    if all(k in b for k in ("x", "y", "w", "h")):
+                        boxes.append(
+                            {
+                                "x": float(b.get("x")),
+                                "y": float(b.get("y")),
+                                "w": float(b.get("w")),
+                                "h": float(b.get("h")),
+                                "score": item.get("score"),
+                            }
+                        )
+                        continue
+            if isinstance(item, (list, tuple)) and len(item) == 4:
+                x1, y1, x2, y2 = item
+                try:
+                    x1f = float(x1)
+                    y1f = float(y1)
+                    x2f = float(x2)
+                    y2f = float(y2)
+                    boxes.append({"x": x1f, "y": y1f, "w": x2f - x1f, "h": y2f - y1f})
+                except Exception:
+                    continue
+    return [b for b in boxes if b.get("w") and b.get("h") and b.get("w") > 0 and b.get("h") > 0]
+
+
+def _extract_segment_svg(segment_response: Any) -> Optional[str]:
+    if not segment_response:
+        return None
+    if isinstance(segment_response, str):
+        return segment_response.strip() or None
+    if isinstance(segment_response, dict):
+        for key in ("svg", "mask_svg", "result", "output"):
+            val = segment_response.get(key)
+            if isinstance(val, str) and val.strip().startswith("<svg"):
+                return val.strip()
+        # Sometimes nested: {result:{svg:"<svg ..."}}
+        if isinstance(segment_response.get("result"), dict):
+            r = segment_response["result"]
+            if isinstance(r.get("svg"), str) and r["svg"].strip().startswith("<svg"):
+                return r["svg"].strip()
+    return None
+
+
+def upsert_segment_row(
+    con: sqlite3.Connection, asset_id: str, tag: str, svg: Optional[str], bbox_json: Optional[str]
+) -> None:
+    con.execute(
+        """
+        INSERT INTO asset_segments (asset_id, tag, svg, bbox_json, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(asset_id, tag) DO UPDATE SET
+          svg=excluded.svg,
+          bbox_json=excluded.bbox_json,
+          updated_at=excluded.updated_at
+        """,
+        (asset_id, tag, svg, bbox_json),
+    )
+
+def upsert_embedding_row(
+    con: sqlite3.Connection,
+    asset_id: str,
+    model: str,
+    dim: int,
+    embedding_blob: Optional[bytes],
+) -> None:
+    con.execute(
+        """
+        INSERT INTO asset_embeddings (asset_id, model, dim, embedding, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(asset_id) DO UPDATE SET
+          model=excluded.model,
+          dim=excluded.dim,
+          embedding=excluded.embedding,
+          updated_at=excluded.updated_at
+        """,
+        (asset_id, model, dim, embedding_blob),
+    )
+
+
+def _get_embedder() -> Tuple[Optional[Any], Optional[str]]:
+    """
+    Lazily initialize sentence-transformers embedding model.
+    If deps are missing, return (None, None) and continue without vector search.
+    """
+    global _EMBEDDER, _EMBEDDER_MODEL_NAME
+    model_name = os.getenv("MOONDREAM_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    if _EMBEDDER is not None and _EMBEDDER_MODEL_NAME == model_name:
+        return _EMBEDDER, _EMBEDDER_MODEL_NAME
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        _EMBEDDER = SentenceTransformer(model_name)
+        _EMBEDDER_MODEL_NAME = model_name
+        return _EMBEDDER, _EMBEDDER_MODEL_NAME
+    except Exception as exc:
+        print(f"[worker] embeddings disabled (sentence-transformers not available): {exc}")
+        _EMBEDDER = None
+        _EMBEDDER_MODEL_NAME = None
+        return None, None
+
+
+def embed_text_to_f32_blob(text: str) -> Tuple[Optional[str], Optional[int], Optional[bytes]]:
+    emb, model_name = _get_embedder()
+    if emb is None or model_name is None:
+        return None, None, None
+    try:
+        import numpy as np  # type: ignore
+
+        vec = emb.encode([text], normalize_embeddings=True)[0]
+        arr = np.asarray(vec, dtype=np.float32)
+        return model_name, int(arr.shape[0]), arr.tobytes()
+    except Exception as exc:
+        print(f"[worker] embedding failed: {exc}")
+        return None, None, None
+
+
+def delete_segments_not_in(con: sqlite3.Connection, asset_id: str, keep_tags: List[str]) -> None:
+    if not keep_tags:
+        con.execute("DELETE FROM asset_segments WHERE asset_id = ?", (asset_id,))
+        return
+    placeholders = ",".join(["?"] * len(keep_tags))
+    con.execute(
+        f"DELETE FROM asset_segments WHERE asset_id = ? AND tag NOT IN ({placeholders})",
+        [asset_id, *keep_tags],
+    )
+
 
 def main() -> int:
     db_path = os.getenv("MOONDREAM_DB_PATH", default_db_path())
@@ -258,16 +516,80 @@ def main() -> int:
             con.execute("COMMIT")
 
             try:
-                caption, tags = provider.caption_and_tags(job.storage_path)
+                caption = provider.caption(job.storage_path, length="long")
+
+                # Candidate tags are filtered by detect; we only store detect-confirmed tags.
+                max_tags = int(os.getenv("MOONDREAM_SEGMENT_TOP_N", "8"))
+                candidates = _tokenize_candidates(caption)
+
+                kept_tags: List[str] = []
+                bbox_by_tag: Dict[str, Any] = {}
+
+                # Probe a few more candidates than we plan to keep, then stop once we have enough.
+                for cand in candidates[: max(24, max_tags * 3)]:
+                    if len(kept_tags) >= max_tags:
+                        break
+                    try:
+                        detect_resp = provider.detect(job.storage_path, cand)
+                        boxes = _extract_detect_boxes(detect_resp)
+                        if not boxes:
+                            continue
+                        kept_tags.append(cand)
+                        bbox_by_tag[cand] = {
+                            "tag": cand,
+                            "boxes": boxes,
+                            "raw": detect_resp,
+                        }
+                    except Exception:
+                        continue
+
+                # Segment the kept tags (best-effort).
+                segments: Dict[str, Optional[str]] = {}
+                for tag in kept_tags:
+                    try:
+                        seg_resp = provider.segment(job.storage_path, tag)
+                        segments[tag] = _extract_segment_svg(seg_resp)
+                    except Exception:
+                        segments[tag] = None
+
+                # Compute caption embedding for semantic search (best-effort).
+                emb_model, emb_dim, emb_blob = embed_text_to_f32_blob(caption)
+
                 con.execute("BEGIN")
                 write_results(
                     con,
                     job.asset_id,
                     caption=caption,
-                    tags=tags,
+                    tags=kept_tags,
                     status="done",
                     model_version=provider.model_version(),
                 )
+
+                if emb_model and emb_dim and emb_blob:
+                    upsert_embedding_row(
+                        con,
+                        asset_id=job.asset_id,
+                        model=emb_model,
+                        dim=emb_dim,
+                        embedding_blob=emb_blob,
+                    )
+
+                # Store per-tag segment + bbox payloads for highlight overlays.
+                for tag in kept_tags:
+                    bbox_json = None
+                    try:
+                        bbox_json = json.dumps(bbox_by_tag.get(tag))
+                    except Exception:
+                        bbox_json = None
+                    upsert_segment_row(
+                        con,
+                        asset_id=job.asset_id,
+                        tag=tag,
+                        svg=segments.get(tag),
+                        bbox_json=bbox_json,
+                    )
+                delete_segments_not_in(con, job.asset_id, kept_tags)
+
                 update_search_index(con, job.asset_id)
                 con.execute("COMMIT")
                 print(f"[worker] done asset={job.asset_id}")
@@ -281,6 +603,7 @@ def main() -> int:
                     status="failed",
                     model_version=provider.model_version(),
                 )
+                delete_segments_not_in(con, job.asset_id, [])
                 update_search_index(con, job.asset_id)
                 con.execute("COMMIT")
                 print(f"[worker] failed asset={job.asset_id}: {exc}")

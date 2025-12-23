@@ -39,6 +39,20 @@ export function ensureMigrations(db: any) {
       db.exec("ROLLBACK");
       throw err;
     }
+    current = 2;
+  }
+
+  if (current < 3) {
+    const sql = readSqlFile("./migrations/003_ai_vectors_segments.sql");
+    db.exec("BEGIN");
+    try {
+      db.exec(sql);
+      db.exec("PRAGMA user_version = 3");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
 }
 

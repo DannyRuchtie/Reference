@@ -25,6 +25,12 @@ function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
 }
 
+// Viewport zoom limits:
+// - Max zoom-in is 100% (1.0)
+// - Allow zooming out to 1% (0.01)
+const MIN_ZOOM = 0.01;
+const MAX_ZOOM = 1.0;
+
 function ensureRoundedSpriteMask(sp: PIXI.Sprite) {
   const w = sp.texture?.orig?.width ?? 0;
   const h = sp.texture?.orig?.height ?? 0;
@@ -100,6 +106,12 @@ export function PixiWorkspace(props: {
   initialAssets: AssetWithAi[];
   initialObjects: CanvasObjectRow[];
   initialView?: { world_x: number; world_y: number; zoom: number } | null;
+  highlightOverlay?: {
+    assetId: string;
+    term: string;
+    svg: string | null;
+    bboxJson: string | null;
+  } | null;
   onObjectsChange?: (objects: CanvasObjectRow[]) => void;
   onFocusRequest?: (fn: (objectId: string) => void) => void;
   onViewportCenterRequest?: (fn: () => { x: number; y: number }) => void;
@@ -112,6 +124,7 @@ export function PixiWorkspace(props: {
   const textureCacheRef = useRef<Map<string, PIXI.Texture>>(new Map());
   const texturePromiseRef = useRef<Map<string, Promise<PIXI.Texture>>>(new Map());
   const selectedIdsRef = useRef<string[]>([]);
+  const highlightOverlayByObjectIdRef = useRef<Map<string, PIXI.Container>>(new Map());
   const previewRef = useRef<{
     rt: PIXI.RenderTexture;
     root: PIXI.Container;
@@ -340,6 +353,120 @@ export function PixiWorkspace(props: {
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const primarySelectedId = selectedIds.length === 1 ? selectedIds[0] : null;
 
+  const clearHighlightOverlays = () => {
+    for (const [objectId, c] of highlightOverlayByObjectIdRef.current.entries()) {
+      try {
+        c.destroy({ children: true });
+      } catch {
+        // ignore
+      }
+      highlightOverlayByObjectIdRef.current.delete(objectId);
+    }
+  };
+
+  const parseBoxesFromBboxJson = (bboxJson: string | null) => {
+    if (!bboxJson) return [] as Array<{ x: number; y: number; w: number; h: number }>;
+    try {
+      const parsed = JSON.parse(bboxJson) as any;
+      const boxes = parsed?.boxes;
+      if (!Array.isArray(boxes)) return [];
+      return boxes
+        .map((b: any) => ({
+          x: Number(b?.x ?? 0),
+          y: Number(b?.y ?? 0),
+          w: Number(b?.w ?? 0),
+          h: Number(b?.h ?? 0),
+        }))
+        .filter((b) => Number.isFinite(b.x) && Number.isFinite(b.y) && b.w > 0 && b.h > 0);
+    } catch {
+      return [];
+    }
+  };
+
+  const applyHighlightToObject = (objectId: string, assetId: string) => {
+    const sp = spritesByObjectIdRef.current.get(objectId);
+    if (!sp) return;
+
+    const overlay = props.highlightOverlay;
+    if (!overlay || overlay.assetId !== assetId) return;
+
+    // Determine base image dimensions in local sprite space.
+    let baseW = sp.texture?.orig?.width ?? 0;
+    let baseH = sp.texture?.orig?.height ?? 0;
+    if ((baseW <= 0 || baseH <= 0) && assetById.get(assetId)) {
+      const a = assetById.get(assetId)!;
+      baseW = a.width ?? 0;
+      baseH = a.height ?? 0;
+    }
+    if (baseW <= 0 || baseH <= 0) return;
+
+    const c = new PIXI.Container();
+    c.eventMode = "none";
+
+    // SVG overlay (preferred): render as tinted sprite stretched to image bounds.
+    if (overlay.svg && overlay.svg.trim().startsWith("<svg")) {
+      const svgDataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(overlay.svg)}`;
+      const tex = PIXI.Texture.from(svgDataUrl);
+      const svgSp = new PIXI.Sprite(tex);
+      svgSp.anchor.set(0.5);
+      svgSp.width = baseW;
+      svgSp.height = baseH;
+      svgSp.alpha = 0.22;
+      svgSp.tint = THEME_ACCENT;
+      svgSp.blendMode = "screen";
+      c.addChild(svgSp);
+    }
+
+    // BBox fallback/augmentation: draw translucent rectangles.
+    const boxes = parseBoxesFromBboxJson(overlay.bboxJson);
+    if (boxes.length) {
+      const normalized = boxes.every(
+        (b) =>
+          b.x >= 0 &&
+          b.y >= 0 &&
+          b.x <= 1.5 &&
+          b.y <= 1.5 &&
+          b.w > 0 &&
+          b.h > 0 &&
+          b.w <= 1.5 &&
+          b.h <= 1.5
+      );
+      const g = new PIXI.Graphics();
+      g.eventMode = "none";
+      for (const b of boxes) {
+        const xPx = normalized ? b.x * baseW : b.x;
+        const yPx = normalized ? b.y * baseH : b.y;
+        const wPx = normalized ? b.w * baseW : b.w;
+        const hPx = normalized ? b.h * baseH : b.h;
+        const lx = -baseW / 2 + xPx;
+        const ly = -baseH / 2 + yPx;
+        g.rect(lx, ly, wPx, hPx);
+        g.fill({ color: THEME_ACCENT, alpha: 0.10 });
+        g.stroke({ color: THEME_ACCENT, alpha: 0.85, width: 3 });
+      }
+      c.addChild(g);
+    }
+
+    sp.addChild(c);
+    highlightOverlayByObjectIdRef.current.set(objectId, c);
+  };
+
+  // Apply/clear highlights when the requested overlay changes or when objects are (re)built.
+  useEffect(() => {
+    clearHighlightOverlays();
+    const overlay = props.highlightOverlay;
+    if (!overlay) return;
+    for (const o of objects) {
+      if (o.type !== "image" || !o.asset_id) continue;
+      if (o.asset_id !== overlay.assetId) continue;
+      applyHighlightToObject(o.id, o.asset_id);
+    }
+    return () => {
+      clearHighlightOverlays();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.highlightOverlay, objects, assetById]);
+
   // Keyboard delete/backspace to remove selected objects from canvas + DB (via canvas save).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -445,7 +572,8 @@ export function PixiWorkspace(props: {
       // Restore last viewport for this project (pan + zoom)
       if (props.initialView) {
         world.position.set(props.initialView.world_x, props.initialView.world_y);
-        world.scale.set(props.initialView.zoom);
+        const z = Number.isFinite(props.initialView.zoom) ? props.initialView.zoom : 1;
+        world.scale.set(clamp(z, MIN_ZOOM, MAX_ZOOM));
       }
 
       // Minimap overlay (screen-space)
@@ -796,9 +924,9 @@ export function PixiWorkspace(props: {
         const zoomBase = 1.16; // increase for faster zoom out/in
         const factor = Math.pow(zoomBase, direction * step);
         // Ease into zoom limits (rubber-band resistance near the ends).
-        // Max zoom-in is 100% (1.0). Allow zooming out to 5% (0.05).
-        const minZoom = 0.25;
-        const maxZoom = 1.0;
+        // Max zoom-in is 100% (1.0). Allow zooming out to 1% (0.01).
+        const minZoom = MIN_ZOOM;
+        const maxZoom = MAX_ZOOM;
         const current = world.scale.x;
         const desired = current * factor;
         const range = Math.max(1e-6, maxZoom - minZoom);

@@ -19,6 +19,12 @@ export function ProjectWorkspace(props: {
 }) {
   const { project } = props;
   const [objects, setObjects] = useState<CanvasObjectRow[]>(props.initialObjects);
+  const [highlight, setHighlight] = useState<{
+    assetId: string;
+    term: string;
+    svg: string | null;
+    bboxJson: string | null;
+  } | null>(null);
   const [focusFn, setFocusFn] = useState<((objectId: string) => void) | null>(null);
   const [viewportCenterFn, setViewportCenterFn] = useState<
     (() => { x: number; y: number }) | null
@@ -33,6 +39,7 @@ export function ProjectWorkspace(props: {
         initialAssets={props.initialAssets}
         initialObjects={objects}
         initialView={props.initialView}
+        highlightOverlay={highlight}
         onObjectsChange={setObjects}
         onFocusRequest={(fn) => setFocusFn(() => fn)}
         onViewportCenterRequest={(fn) => setViewportCenterFn(() => fn)}
@@ -77,6 +84,7 @@ export function ProjectWorkspace(props: {
             body: JSON.stringify({ objects: next }),
           });
         }}
+        onHighlightAsset={(payload) => setHighlight(payload)}
       />
     </div>
   );

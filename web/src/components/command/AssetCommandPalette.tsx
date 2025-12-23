@@ -10,6 +10,12 @@ export function AssetCommandPalette(props: {
   objects: CanvasObjectRow[];
   onFocusObjectId: (objectId: string) => void;
   onPlaceAssetAtViewportCenter: (assetId: string) => void;
+  onHighlightAsset?: (payload: {
+    assetId: string;
+    term: string;
+    svg: string | null;
+    bboxJson: string | null;
+  }) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -94,6 +100,29 @@ export function AssetCommandPalette(props: {
                     setOpen(false);
                     if (onCanvas) props.onFocusObjectId(onCanvas);
                     else props.onPlaceAssetAtViewportCenter(a.id);
+
+                    const term = search.trim().split(/\s+/g).filter(Boolean)[0]?.toLowerCase();
+                    if (!term) return;
+                    if (!props.onHighlightAsset) return;
+
+                    // Best-effort: ask the server for cached segment/bbox for this term.
+                    // If missing, just skip highlight (keeps existing UX intact).
+                    fetch(
+                      `/api/projects/${props.projectId}/assets/${a.id}/segments?term=${encodeURIComponent(
+                        term
+                      )}`
+                    )
+                      .then((r) => (r.ok ? r.json() : null))
+                      .then((data) => {
+                        if (!data) return;
+                        props.onHighlightAsset?.({
+                          assetId: a.id,
+                          term,
+                          svg: (data.svg as string | null) ?? null,
+                          bboxJson: (data.bboxJson as string | null) ?? null,
+                        });
+                      })
+                      .catch(() => {});
                   }}
                   className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-zinc-200 aria-selected:bg-zinc-900"
                 >

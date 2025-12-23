@@ -38,6 +38,22 @@ export type AssetAiRow = {
   updated_at: string;
 };
 
+export type AssetEmbeddingRow = {
+  asset_id: string;
+  model: string;
+  dim: number;
+  embedding: Buffer | null;
+  updated_at: string;
+};
+
+export type AssetSegmentRow = {
+  asset_id: string;
+  tag: string;
+  svg: string | null;
+  bbox_json: string | null;
+  updated_at: string;
+};
+
 export type AssetWithAi = AssetRow & {
   ai_caption: string | null;
   ai_tags_json: string | null;
