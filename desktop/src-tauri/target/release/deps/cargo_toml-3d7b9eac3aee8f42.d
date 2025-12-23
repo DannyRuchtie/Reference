@@ -1,0 +1,10 @@
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/cargo_toml-3d7b9eac3aee8f42.d: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/cargo_toml.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/afs.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/error.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/inheritable.rs
+
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/libcargo_toml-3d7b9eac3aee8f42.rlib: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/cargo_toml.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/afs.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/error.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/inheritable.rs
+
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/libcargo_toml-3d7b9eac3aee8f42.rmeta: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/cargo_toml.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/afs.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/error.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/inheritable.rs
+
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/cargo_toml.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/afs.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/error.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo_toml-0.15.3/src/inheritable.rs:

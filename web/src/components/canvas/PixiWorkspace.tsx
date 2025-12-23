@@ -5,6 +5,7 @@ import * as PIXI from "pixi.js";
 
 import type { AssetWithAi, CanvasObjectRow } from "@/server/db/types";
 import { AssetLightbox } from "@/components/lightbox/AssetLightbox";
+import { getProjectDraft, patchProjectDraft } from "@/lib/offlineDrafts";
 
 type RippleUniformValues = {
   uTime: number;
@@ -73,6 +74,33 @@ function clamp(v: number, min: number, max: number) {
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
+}
+
+function isVideoMime(mimeType: string | null | undefined) {
+  return !!mimeType && mimeType.startsWith("video/");
+}
+
+function extractHtmlVideoElementFromTexture(tex: PIXI.Texture | null | undefined): HTMLVideoElement | null {
+  const tAny = tex as any;
+  const candidates: any[] = [
+    tAny?.source?.resource,
+    tAny?.source?.resource?.source,
+    tAny?.source?.resource?.domElement,
+    tAny?.baseTexture?.resource,
+    tAny?.baseTexture?.resource?.source,
+    tAny?.baseTexture?.resource?.domElement,
+    tAny?.baseTexture?.source?.resource,
+    tAny?.baseTexture?.source?.resource?.source,
+  ];
+
+  for (const c of candidates) {
+    if (!c) continue;
+    if (typeof HTMLVideoElement !== "undefined" && c instanceof HTMLVideoElement) return c;
+    if (typeof HTMLVideoElement !== "undefined" && c?.source instanceof HTMLVideoElement) return c.source;
+    if (typeof HTMLVideoElement !== "undefined" && c?.domElement instanceof HTMLVideoElement) return c.domElement;
+    if (typeof HTMLVideoElement !== "undefined" && c?.element instanceof HTMLVideoElement) return c.element;
+  }
+  return null;
 }
 
 function redrawMinimapBackground(
@@ -174,6 +202,12 @@ function smoothstep01(t: number) {
   return 0.12 + 0.88 * y;
 }
 
+function easeInOut01(t: number) {
+  const x = clamp(t, 0, 1);
+  // Smoothstep: ease-in-out with zero slope at both ends.
+  return x * x * (3 - 2 * x);
+}
+
 function normalizeZOrder(
   prev: CanvasObjectRow[],
   bringToFrontIds: string[]
@@ -212,6 +246,11 @@ export function PixiWorkspace(props: {
   onFocusRequest?: (fn: (objectId: string) => void) => void;
   onViewportCenterRequest?: (fn: () => { x: number; y: number }) => void;
 }) {
+  const projectId = props.projectId;
+  const initialObjects = props.initialObjects;
+  const initialView = props.initialView ?? null;
+  const onObjectsChange = props.onObjectsChange;
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const appRef = useRef<PIXI.Application | null>(null);
   const worldRef = useRef<PIXI.Container | null>(null);
@@ -220,6 +259,13 @@ export function PixiWorkspace(props: {
   const shadowsByObjectIdRef = useRef<Map<string, PIXI.Graphics>>(new Map());
   const textureCacheRef = useRef<Map<string, PIXI.Texture>>(new Map());
   const texturePromiseRef = useRef<Map<string, Promise<PIXI.Texture>>>(new Map());
+  const videoElByObjectIdRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const videoObjectIdsRef = useRef<Set<string>>(new Set());
+  const videoHoverOverlayByObjectIdRef = useRef<Map<string, PIXI.Graphics>>(new Map());
+  const hoveredVideoObjectIdRef = useRef<string | null>(null);
+  const canvasHoverRef = useRef(false);
+  const playingSelectedVideoObjectIdRef = useRef<string | null>(null);
+  const selectedVideoPlayAttemptAtMsRef = useRef<Map<string, number>>(new Map()); // id -> ms
   const selectedIdsRef = useRef<string[]>([]);
   const highlightOverlayByObjectIdRef = useRef<Map<string, PIXI.Container>>(new Map());
   const shadowLiftByObjectIdRef = useRef<Map<string, { current: number; target: number }>>(new Map());
@@ -231,6 +277,12 @@ export function PixiWorkspace(props: {
     timeSec: number;
   } | null>(null);
   const lastRippleCenter01Ref = useRef<PIXI.Point>(new PIXI.Point(0.5, 0.5));
+  // Drop ripple should only start once the dropped image is actually present on-canvas.
+  // We store the renderer-space drop point + the newly created object id, then trigger
+  // the ripple the moment that object's texture becomes available.
+  const pendingDropRippleRef = useRef<null | { objectId: string; rx: number; ry: number; fired: boolean }>(
+    null
+  );
   const previewRef = useRef<{
     rt: PIXI.RenderTexture;
     root: PIXI.Container;
@@ -268,11 +320,75 @@ export function PixiWorkspace(props: {
       }
   >(null);
 
-  const [objects, setObjects] = useState<CanvasObjectRow[]>(props.initialObjects);
+  const viewAnimRef = useRef<null | {
+    startMs: number;
+    durationMs: number;
+    from: { x: number; y: number; zoom: number };
+    to: { x: number; y: number; zoom: number };
+    onComplete?: () => void;
+  }>(null);
+
+  const cancelViewAnimation = () => {
+    viewAnimRef.current = null;
+  };
+
+  const animateViewTo = (
+    to: { x: number; y: number; zoom: number },
+    opts?: { durationMs?: number; onComplete?: () => void }
+  ) => {
+    const world = worldRef.current;
+    if (!world) return false;
+    const from = { x: world.position.x, y: world.position.y, zoom: world.scale.x || 1 };
+    const durationMs = clamp(opts?.durationMs ?? 280, 80, 1200);
+
+    // If it's already effectively at the target, apply immediately.
+    if (
+      Math.abs(from.x - to.x) < 0.01 &&
+      Math.abs(from.y - to.y) < 0.01 &&
+      Math.abs(from.zoom - to.zoom) < 1e-6
+    ) {
+      world.position.set(to.x, to.y);
+      world.scale.set(to.zoom);
+      opts?.onComplete?.();
+      return true;
+    }
+
+    viewAnimRef.current = {
+      startMs: performance.now(),
+      durationMs,
+      from,
+      to,
+      onComplete: opts?.onComplete,
+    };
+    return true;
+  };
+
+  const viewDistance = (a: { x: number; y: number; zoom: number }, b: { x: number; y: number; zoom: number }) => {
+    // Combine pan distance (px) + zoom distance (scaled into px-ish) into a single heuristic.
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const dz = (a.zoom - b.zoom) * 650;
+    return Math.hypot(dx, dy, dz);
+  };
+
+  const [objects, setObjects] = useState<CanvasObjectRow[]>(initialObjects);
   const [assets, setAssets] = useState<AssetWithAi[]>(props.initialAssets);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [dropError, setDropError] = useState<string | null>(null);
   const [lightboxAssetId, setLightboxAssetId] = useState<string | null>(null);
+  const initialViewOverrideRef = useRef<{ world_x: number; world_y: number; zoom: number } | null>(null);
+  const [syncUi, setSyncUi] = useState(() => ({
+    // IMPORTANT: keep the initial render deterministic so SSR and client hydration match.
+    // We update this from `navigator.onLine` inside a useEffect after mount.
+    online: true,
+    dirtyCanvas: false,
+    dirtyView: false,
+    syncing: false,
+  }));
+  const dirtyRef = useRef<{ canvas: boolean; view: boolean }>({ canvas: false, view: false });
+  const flushInFlightRef = useRef<Promise<void> | null>(null);
+  const localCanvasDraftTimer = useRef<number | null>(null);
+  const localViewDraftTimer = useRef<number | null>(null);
   const [lightboxOriginRect, setLightboxOriginRect] = useState<{
     left: number;
     top: number;
@@ -316,7 +432,18 @@ export function PixiWorkspace(props: {
     }
   };
 
-  const objectsRef = useRef<CanvasObjectRow[]>(props.initialObjects);
+  const maybeTriggerPendingDropRipple = (objectId: string, tex: PIXI.Texture | null | undefined) => {
+    const pending = pendingDropRippleRef.current;
+    if (!pending || pending.fired) return;
+    if (pending.objectId !== objectId) return;
+    const w = Number(tex?.orig?.width ?? 0);
+    const h = Number(tex?.orig?.height ?? 0);
+    if (!(w > 0 && h > 0)) return;
+    pending.fired = true;
+    triggerRippleAtRendererPoint(pending.rx, pending.ry, { shapeAspect: w / h, shapeRotation: 0 });
+  };
+
+  const objectsRef = useRef<CanvasObjectRow[]>(initialObjects);
   useEffect(() => {
     objectsRef.current = objects;
   }, [objects]);
@@ -330,9 +457,151 @@ export function PixiWorkspace(props: {
 
   useEffect(() => setAssets(props.initialAssets), [props.initialAssets]);
   useEffect(() => {
-    setObjects(props.initialObjects);
+    setObjects(initialObjects);
+    initialViewOverrideRef.current = null;
+    dirtyRef.current = { canvas: false, view: false };
+    setSyncUi((s) => ({ ...s, dirtyCanvas: false, dirtyView: false, syncing: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.projectId]);
+  }, [projectId]);
+
+  const setDirtyCanvas = (v: boolean) => {
+    if (dirtyRef.current.canvas === v) return;
+    dirtyRef.current.canvas = v;
+    setSyncUi((s) => ({ ...s, dirtyCanvas: v }));
+  };
+  const setDirtyView = (v: boolean) => {
+    if (dirtyRef.current.view === v) return;
+    dirtyRef.current.view = v;
+    setSyncUi((s) => ({ ...s, dirtyView: v }));
+  };
+
+  useEffect(() => {
+    const updateOnline = () => setSyncUi((s) => ({ ...s, online: navigator.onLine }));
+    updateOnline();
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const draft = await getProjectDraft(projectId);
+        if (cancelled) return;
+        if (!draft) {
+          setDirtyCanvas(false);
+          setDirtyView(false);
+          // Seed a baseline snapshot so a previously visited project can restore from IndexedDB
+          // even if the backend is temporarily unavailable later.
+          void patchProjectDraft(projectId, {
+            canvas: initialObjects,
+            view: initialView,
+            dirtyCanvas: false,
+            dirtyView: false,
+          }).catch(() => {});
+          return;
+        }
+
+        setDirtyCanvas(!!draft.dirtyCanvas);
+        setDirtyView(!!draft.dirtyView);
+
+        const initialNewestMs = Math.max(
+          0,
+          ...initialObjects
+            .map((o) => Date.parse(o.updated_at || o.created_at || ""))
+            .filter((n) => Number.isFinite(n))
+        );
+
+        if (draft.canvas && (draft.dirtyCanvas || draft.updatedAt > initialNewestMs)) {
+          setObjects(draft.canvas);
+          onObjectsChange?.(draft.canvas);
+        }
+
+        if (draft.view) {
+          initialViewOverrideRef.current = draft.view;
+          const world = worldRef.current;
+          if (world) {
+            world.position.set(draft.view.world_x, draft.view.world_y);
+            const z = Number.isFinite(draft.view.zoom) ? draft.view.zoom : 1;
+            world.scale.set(clamp(z, MIN_ZOOM, MAX_ZOOM));
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, initialObjects, onObjectsChange]);
+
+  const flushDraftToServer = async () => {
+    if (flushInFlightRef.current) return flushInFlightRef.current;
+    if (!syncUi.online) return;
+
+    const p = (async () => {
+      setSyncUi((s) => ({ ...s, syncing: true }));
+      try {
+        const draft = await getProjectDraft(projectId);
+        if (!draft) return;
+
+        let dirtyCanvas = !!draft.dirtyCanvas;
+        let dirtyView = !!draft.dirtyView;
+
+        if (dirtyCanvas && draft.canvas) {
+          try {
+            const res = await fetch(`/api/projects/${projectId}/canvas`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ objects: draft.canvas }),
+            });
+            if (!res.ok) throw new Error(`canvas_sync_failed:${res.status}`);
+            dirtyCanvas = false;
+            await patchProjectDraft(projectId, { canvas: draft.canvas, dirtyCanvas: false }).catch(() => {});
+          } catch {
+            // keep dirtyCanvas=true
+          }
+        }
+
+        if (dirtyView && draft.view) {
+          try {
+            const res = await fetch(`/api/projects/${projectId}/view`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(draft.view),
+            });
+            if (!res.ok) throw new Error(`view_sync_failed:${res.status}`);
+            dirtyView = false;
+            await patchProjectDraft(projectId, { view: draft.view, dirtyView: false }).catch(() => {});
+          } catch {
+            // keep dirtyView=true
+          }
+        }
+
+        setDirtyCanvas(dirtyCanvas);
+        setDirtyView(dirtyView);
+      } finally {
+        setSyncUi((s) => ({ ...s, syncing: false }));
+        flushInFlightRef.current = null;
+      }
+    })();
+
+    flushInFlightRef.current = p;
+    return p;
+  };
+
+  useEffect(() => {
+    if (!syncUi.online) return;
+    if (!syncUi.dirtyCanvas && !syncUi.dirtyView) return;
+    void flushDraftToServer();
+    const id = window.setInterval(() => void flushDraftToServer(), 3000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, syncUi.online, syncUi.dirtyCanvas, syncUi.dirtyView]);
 
   // Debounced canvas persistence
   const saveTimer = useRef<number | null>(null);
@@ -344,49 +613,89 @@ export function PixiWorkspace(props: {
   // Avoid React warning: do not synchronously update parent state from inside Pixi event updates.
   // Coalesce into a future macrotask.
   const scheduleEmitObjectsChange = (next: CanvasObjectRow[]) => {
-    if (!props.onObjectsChange) return;
+    if (!onObjectsChange) return;
     emitLatestRef.current = next;
     if (emitTimerRef.current) return;
     emitTimerRef.current = window.setTimeout(() => {
       emitTimerRef.current = null;
       const latest = emitLatestRef.current;
       emitLatestRef.current = null;
-      if (latest) props.onObjectsChange?.(latest);
+      if (latest) onObjectsChange?.(latest);
     }, 0);
   };
 
   const scheduleSave = (nextObjects: CanvasObjectRow[]) => {
+    if (localCanvasDraftTimer.current) window.clearTimeout(localCanvasDraftTimer.current);
+    localCanvasDraftTimer.current = window.setTimeout(() => {
+      void patchProjectDraft(projectId, { canvas: nextObjects, dirtyCanvas: true }).catch(() => {});
+    }, 40);
+    setDirtyCanvas(true);
+
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(async () => {
-      await fetch(`/api/projects/${props.projectId}/canvas`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ objects: nextObjects }),
-      }).catch(() => {});
+      try {
+        const res = await fetch(`/api/projects/${props.projectId}/canvas`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objects: nextObjects }),
+        });
+        if (!res.ok) throw new Error(`canvas_save_failed:${res.status}`);
+        void patchProjectDraft(projectId, { canvas: nextObjects, dirtyCanvas: false }).catch(() => {});
+        setDirtyCanvas(false);
+      } catch {
+        setDirtyCanvas(true);
+      }
     }, 250);
     schedulePreviewSave();
   };
 
   const saveNow = async (nextObjects: CanvasObjectRow[]) => {
+    if (localCanvasDraftTimer.current) {
+      window.clearTimeout(localCanvasDraftTimer.current);
+      localCanvasDraftTimer.current = null;
+    }
+    void patchProjectDraft(projectId, { canvas: nextObjects, dirtyCanvas: true }).catch(() => {});
+    setDirtyCanvas(true);
+
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    await fetch(`/api/projects/${props.projectId}/canvas`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ objects: nextObjects }),
-    }).catch(() => {});
+    try {
+      const res = await fetch(`/api/projects/${props.projectId}/canvas`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ objects: nextObjects }),
+      });
+      if (!res.ok) throw new Error(`canvas_save_failed:${res.status}`);
+      void patchProjectDraft(projectId, { canvas: nextObjects, dirtyCanvas: false }).catch(() => {});
+      setDirtyCanvas(false);
+    } catch {
+      setDirtyCanvas(true);
+    }
   };
 
   const scheduleViewSave = (view: { world_x: number; world_y: number; zoom: number }) => {
+    if (localViewDraftTimer.current) window.clearTimeout(localViewDraftTimer.current);
+    localViewDraftTimer.current = window.setTimeout(() => {
+      void patchProjectDraft(projectId, { view, dirtyView: true }).catch(() => {});
+    }, 60);
+    setDirtyView(true);
+
     if (viewSaveTimer.current) window.clearTimeout(viewSaveTimer.current);
     viewSaveTimer.current = window.setTimeout(async () => {
-      await fetch(`/api/projects/${props.projectId}/view`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(view),
-      }).catch(() => {});
+      try {
+        const res = await fetch(`/api/projects/${props.projectId}/view`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(view),
+        });
+        if (!res.ok) throw new Error(`view_save_failed:${res.status}`);
+        void patchProjectDraft(projectId, { view, dirtyView: false }).catch(() => {});
+        setDirtyView(false);
+      } catch {
+        setDirtyView(true);
+      }
     }, 250);
   };
 
@@ -509,6 +818,22 @@ export function PixiWorkspace(props: {
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const primarySelectedId = selectedIds.length === 1 ? selectedIds[0] : null;
+
+  const setHoveredVideoObjectId = (next: string | null) => {
+    const prev = hoveredVideoObjectIdRef.current;
+    if (prev === next) return;
+    hoveredVideoObjectIdRef.current = next;
+
+    if (prev) {
+      const gPrev = videoHoverOverlayByObjectIdRef.current.get(prev);
+      if (gPrev) gPrev.visible = false;
+    }
+
+    if (next) {
+      const gNext = videoHoverOverlayByObjectIdRef.current.get(next);
+      if (gNext) gNext.visible = true;
+    }
+  };
 
   const clearHighlightOverlays = () => {
     for (const [objectId, c] of highlightOverlayByObjectIdRef.current.entries()) {
@@ -685,22 +1010,94 @@ export function PixiWorkspace(props: {
 
         e.preventDefault();
 
+        // Keep the current viewport center pinned while zooming out.
         const center = new PIXI.Point(app.renderer.width / 2, app.renderer.height / 2);
-        const before = world.toLocal(center);
-        const nextScale = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
-        if (world.scale.x !== nextScale || world.scale.y !== nextScale) {
-          world.scale.set(nextScale);
-          const after = world.toLocal(center);
-          world.position.x += (after.x - before.x) * world.scale.x;
-          world.position.y += (after.y - before.y) * world.scale.y;
-        }
+        const centerWorld = world.toLocal(center);
+        const nextZoom = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
+        const endX = center.x - centerWorld.x * nextZoom;
+        const endY = center.y - centerWorld.y * nextZoom;
 
-        scheduleViewSave({
-          world_x: world.position.x,
-          world_y: world.position.y,
-          zoom: world.scale.x,
-        });
-        schedulePreviewSave();
+        cancelViewAnimation();
+        animateViewTo(
+          { x: endX, y: endY, zoom: nextZoom },
+          {
+            durationMs: 260,
+            onComplete: () => {
+              const w2 = worldRef.current;
+              if (!w2) return;
+              scheduleViewSave({
+                world_x: w2.position.x,
+                world_y: w2.position.y,
+                zoom: w2.scale.x,
+              });
+              schedulePreviewSave();
+            },
+          }
+        );
+        return;
+      }
+
+      // Focus toggle with Space:
+      // - toggles between focusing the selected element and the same zoom-out target as pressing "0"
+      // NOTE: Space is a common "page scroll" key, so only trigger when pointer is over the canvas.
+      if (!isTyping && canvasHoverRef.current && (e.code === "Space" || e.key === " " || e.key === "Spacebar")) {
+        const app = appRef.current;
+        const world = worldRef.current;
+        if (!app || !world) return;
+
+        const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+        if (!selectedId) return;
+        const sp = spritesByObjectIdRef.current.get(selectedId) as PIXI.Sprite | undefined;
+        if (!sp) return;
+
+        const currentZoom = world.scale.x || 1;
+        const fitZoom =
+          fitZoomForSprite(sp, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ?? null;
+        // Space should feel like "zoom in", so never zoom out when focusing.
+        // Even if fitZoom is smaller, we still zoom in by a fixed factor for continuity.
+        const nextZoom = clamp(Math.max(currentZoom * 1.6, fitZoom ?? 0, currentZoom), MIN_ZOOM, MAX_ZOOM);
+        const p = sp.position;
+        const endX = app.renderer.width / 2 - p.x * nextZoom;
+        const endY = app.renderer.height / 2 - p.y * nextZoom;
+
+        e.preventDefault();
+
+        const currentView = { x: world.position.x, y: world.position.y, zoom: world.scale.x || 1 };
+        const focusView = { x: endX, y: endY, zoom: nextZoom };
+
+        // Compute the exact same zoom-out target as pressing "0": 10% zoom,
+        // keeping the current viewport center pinned in world space.
+        const center = new PIXI.Point(app.renderer.width / 2, app.renderer.height / 2);
+        const centerWorld = world.toLocal(center);
+        const outZoom = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
+        const outView = {
+          x: center.x - centerWorld.x * outZoom,
+          y: center.y - centerWorld.y * outZoom,
+          zoom: outZoom,
+        };
+
+        // Decide which direction to toggle based on which endpoint we are closer to.
+        const dFocus = viewDistance(currentView, focusView);
+        const dOut = viewDistance(currentView, outView);
+        const goingTo = dFocus <= dOut ? outView : focusView;
+
+        cancelViewAnimation();
+        animateViewTo(
+          goingTo,
+          {
+            durationMs: 320,
+            onComplete: () => {
+              const w2 = worldRef.current;
+              if (!w2) return;
+              scheduleViewSave({
+                world_x: w2.position.x,
+                world_y: w2.position.y,
+                zoom: w2.scale.x,
+              });
+              schedulePreviewSave();
+            },
+          }
+        );
         return;
       }
 
@@ -960,15 +1357,16 @@ void main()
       const rippleUniforms = new PIXI.UniformGroup({
         uTime: { value: 0, type: "f32" },
         uCenter: { value: new PIXI.Point(0.5, 0.5), type: "vec2<f32>" },
-        uAmplitude: { value: 0.0035, type: "f32" },
-        uFrequency: { value: 46.0, type: "f32" },
-        uSpeed: { value: 0.65, type: "f32" },
-        uWidth: { value: 0.13, type: "f32" },
-        uDecay: { value: 1.7, type: "f32" },
+        // Slower + smoother: softer refraction, lower-frequency waves, wider ring band.
+        uAmplitude: { value: 0.0026, type: "f32" },
+        uFrequency: { value: 28.0, type: "f32" },
+        uSpeed: { value: 0.36, type: "f32" },
+        uWidth: { value: 0.18, type: "f32" },
+        uDecay: { value: 1.4, type: "f32" },
         uAspect: { value: 1.0, type: "f32" },
         uShapeAspect: { value: 1.0, type: "f32" },
         uShapeRotation: { value: 0.0, type: "f32" },
-        uDuration: { value: 1.25, type: "f32" },
+        uDuration: { value: 1.85, type: "f32" },
       }) as unknown as RippleUniformGroup;
 
       const rippleFilter = new PIXI.Filter({
@@ -998,9 +1396,10 @@ void main()
       previewRef.current = { rt, root: previewRoot, content: previewContent, spriteById: new Map() };
 
       // Restore last viewport for this project (pan + zoom)
-      if (props.initialView) {
-        world.position.set(props.initialView.world_x, props.initialView.world_y);
-        const z = Number.isFinite(props.initialView.zoom) ? props.initialView.zoom : 1;
+      const iv = initialViewOverrideRef.current ?? initialView;
+      if (iv) {
+        world.position.set(iv.world_x, iv.world_y);
+        const z = Number.isFinite(iv.zoom) ? iv.zoom : 1;
         world.scale.set(clamp(z, MIN_ZOOM, MAX_ZOOM));
       }
 
@@ -1124,7 +1523,11 @@ void main()
       };
 
       app.canvas.addEventListener("pointerdown", (e) => {
+        canvasHoverRef.current = true;
+        cancelViewAnimation();
         app.canvas.setPointerCapture(e.pointerId);
+        // Avoid hover-preview sticking while dragging/gesturing.
+        setHoveredVideoObjectId(null);
         last = screenToRendererPoint(e.clientX, e.clientY);
         const hit = app.renderer.events.rootBoundary.hitTest(last.x, last.y) as any;
 
@@ -1204,8 +1607,23 @@ void main()
       });
 
       app.canvas.addEventListener("pointermove", (e) => {
+        canvasHoverRef.current = true;
         const gesture = activeGestureRef.current;
-        if (!gesture) return;
+        if (!gesture) {
+          const p = screenToRendererPoint(e.clientX, e.clientY);
+          const hit = app.renderer.events.rootBoundary.hitTest(p.x, p.y) as any;
+          if (hit && hit.__handle) {
+            setHoveredVideoObjectId(null);
+            return;
+          }
+          const objectId = (hit && hit.__objectId ? (hit.__objectId as string) : null) ?? null;
+          if (objectId && videoObjectIdsRef.current.has(objectId)) {
+            setHoveredVideoObjectId(objectId);
+          } else {
+            setHoveredVideoObjectId(null);
+          }
+          return;
+        }
         const cur = screenToRendererPoint(e.clientX, e.clientY);
 
         if (gesture.kind === "pan") {
@@ -1321,6 +1739,8 @@ void main()
       });
 
       app.canvas.addEventListener("wheel", (e) => {
+        canvasHoverRef.current = true;
+        cancelViewAnimation();
         e.preventDefault();
         showMinimap();
         const mouse = screenToRendererPoint(e.clientX, e.clientY);
@@ -1363,6 +1783,15 @@ void main()
 
       // Disable context menu on canvas
       app.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      // If cursor leaves the canvas entirely, stop any hover previews.
+      app.canvas.addEventListener("pointerenter", () => {
+        canvasHoverRef.current = true;
+      });
+      app.canvas.addEventListener("pointerleave", () => {
+        canvasHoverRef.current = false;
+        setHoveredVideoObjectId(null);
+      });
 
       // Double click on an image => open fullscreen viewer with metadata.
       // We keep this lightweight and non-invasive: it doesn't change selection or z-order.
@@ -1738,6 +2167,23 @@ void main()
           }
         }
 
+        // Smooth view animation (used for focus/zoom shortcuts).
+        const viewAnim = viewAnimRef.current;
+        if (viewAnim) {
+          const now = performance.now();
+          const t = viewAnim.durationMs > 0 ? (now - viewAnim.startMs) / viewAnim.durationMs : 1;
+          const e = easeInOut01(t);
+          const nextZoom = lerp(viewAnim.from.zoom, viewAnim.to.zoom, e);
+          world.scale.set(nextZoom);
+          world.position.x = lerp(viewAnim.from.x, viewAnim.to.x, e);
+          world.position.y = lerp(viewAnim.from.y, viewAnim.to.y, e);
+
+          if (t >= 1) {
+            viewAnimRef.current = null;
+            viewAnim.onComplete?.();
+          }
+        }
+
         // Subtle shadow lift animation (card feels "alive" but not distracting).
         const animIds = animatingShadowIdsRef.current;
         if (animIds.size) {
@@ -1768,6 +2214,77 @@ void main()
         updateSelectionOverlay();
         updateMultiSelection();
         updateMinimap();
+
+        // Selected video playback: only the selected video plays, and it loops.
+        const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+        const wantPlayId =
+          selectedId && videoObjectIdsRef.current.has(selectedId) ? selectedId : null;
+        const prevPlayId = playingSelectedVideoObjectIdRef.current;
+
+        if (prevPlayId !== wantPlayId) {
+          // Pause the previous selected video (if any).
+          if (prevPlayId) {
+            const vPrev = videoElByObjectIdRef.current.get(prevPlayId);
+            if (vPrev) vPrev.pause();
+          }
+          playingSelectedVideoObjectIdRef.current = wantPlayId;
+        }
+
+        if (wantPlayId) {
+          const v = videoElByObjectIdRef.current.get(wantPlayId) ?? null;
+          if (v) {
+            v.loop = true;
+            // Throttle play() attempts to avoid spamming if the element isn't ready yet.
+            const now = Date.now();
+            const lastAttempt = Number(selectedVideoPlayAttemptAtMsRef.current.get(wantPlayId) ?? 0);
+            if (v.paused && now - lastAttempt > 250) {
+              selectedVideoPlayAttemptAtMsRef.current.set(wantPlayId, now);
+              v.play().catch(() => {});
+            }
+          }
+        }
+
+        // Hover video preview: progress bar overlay while hovered.
+        const hvId = hoveredVideoObjectIdRef.current;
+        if (hvId) {
+          const sp = spritesByObjectIdRef.current.get(hvId);
+          const g = videoHoverOverlayByObjectIdRef.current.get(hvId);
+          if (sp && g) {
+            const w = Number(sp.texture?.orig?.width ?? 0);
+            const h = Number(sp.texture?.orig?.height ?? 0);
+            if (w > 0 && h > 0) {
+              const v = videoElByObjectIdRef.current.get(hvId) ?? null;
+
+              const dur = v && Number.isFinite(v.duration) ? Number(v.duration) : 0;
+              const cur = v && Number.isFinite(v.currentTime) ? Number(v.currentTime) : 0;
+              const ratio = dur > 0 ? clamp(cur / dur, 0, 1) : 0;
+
+              const minDim = Math.min(w, h);
+              const inset = clamp(minDim * 0.065, 10, 22);
+              const barH = clamp(minDim * 0.045, 4, 10);
+              const barW = Math.max(10, w - inset * 2);
+              const x = -barW / 2;
+              const y = h / 2 - inset - barH;
+              const r = Math.min(barH / 2, 6);
+
+              g.visible = true;
+              g.clear();
+              g.roundRect(x, y, barW, barH, r);
+              g.fill({ color: 0x000000, alpha: 0.42 });
+              g.roundRect(x, y, barW, barH, r);
+              g.stroke({ width: 1, color: 0xffffff, alpha: 0.10 });
+
+              const fillW = barW * ratio;
+              if (fillW > 0.75) {
+                const rFill = Math.min(r, fillW / 2);
+                g.roundRect(x, y, fillW, barH, rFill);
+                g.fill({ color: THEME_ACCENT, alpha: 0.92 });
+              }
+            } else {
+              g.visible = false;
+            }
+          }
+        }
       });
 
       // Initial render
@@ -1795,17 +2312,27 @@ void main()
       const nextZoom =
         fitZoomForSprite(d, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ??
         world.scale.x;
-      if (world.scale.x !== nextZoom || world.scale.y !== nextZoom) {
-        world.scale.set(nextZoom);
-      }
-      world.position.x = app.renderer.width / 2 - p.x * nextZoom;
-      world.position.y = app.renderer.height / 2 - p.y * nextZoom;
       setSelectedIds([objectId]);
-      scheduleViewSave({
-        world_x: world.position.x,
-        world_y: world.position.y,
-        zoom: nextZoom,
-      });
+
+      const endX = app.renderer.width / 2 - p.x * nextZoom;
+      const endY = app.renderer.height / 2 - p.y * nextZoom;
+      cancelViewAnimation();
+      animateViewTo(
+        { x: endX, y: endY, zoom: nextZoom },
+        {
+          durationMs: 340,
+          onComplete: () => {
+            const w2 = worldRef.current;
+            if (!w2) return;
+            scheduleViewSave({
+              world_x: w2.position.x,
+              world_y: w2.position.y,
+              zoom: w2.scale.x,
+            });
+            schedulePreviewSave();
+          },
+        }
+      );
     });
 
     props.onViewportCenterRequest?.(() => {
@@ -1833,6 +2360,9 @@ void main()
       if (!keep.has(id)) {
         display.destroy({ children: true });
         spritesByObjectIdRef.current.delete(id);
+        videoElByObjectIdRef.current.delete(id);
+        videoObjectIdsRef.current.delete(id);
+        videoHoverOverlayByObjectIdRef.current.delete(id);
         shadowLiftByObjectIdRef.current.delete(id);
         animatingShadowIdsRef.current.delete(id);
       }
@@ -1841,6 +2371,9 @@ void main()
       if (!keep.has(id)) {
         sh.destroy({ children: true });
         shadowsByObjectIdRef.current.delete(id);
+        videoElByObjectIdRef.current.delete(id);
+        videoObjectIdsRef.current.delete(id);
+        videoHoverOverlayByObjectIdRef.current.delete(id);
         shadowLiftByObjectIdRef.current.delete(id);
         animatingShadowIdsRef.current.delete(id);
       }
@@ -1896,6 +2429,19 @@ void main()
         spritesByObjectIdRef.current.set(o.id, sp);
         world.addChild(sp);
 
+        // Hover video preview: show progress bar while hovered.
+        if (isVideoMime(a.mime_type)) {
+          videoObjectIdsRef.current.add(o.id);
+
+          const g = new PIXI.Graphics();
+          g.eventMode = "none";
+          g.visible = false;
+          videoHoverOverlayByObjectIdRef.current.set(o.id, g);
+          sp.addChild(g);
+        } else {
+          videoObjectIdsRef.current.delete(o.id);
+        }
+
         const rawUrl = a.storage_url;
         const absUrl = rawUrl.startsWith("http")
           ? rawUrl
@@ -1905,12 +2451,19 @@ void main()
         if (cached) {
           sp.texture = cached;
           ensureRoundedSpriteMask(sp);
+          const v = extractHtmlVideoElementFromTexture(sp.texture);
+          if (v) {
+            videoElByObjectIdRef.current.set(o.id, v);
+          } else {
+            videoElByObjectIdRef.current.delete(o.id);
+          }
           const w = sp.texture?.orig?.width ?? 0;
           const h = sp.texture?.orig?.height ?? 0;
           if (w > 0 && h > 0) {
             const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
             drawSoftShadow(sh, w, h, r, shadowLiftByObjectIdRef.current.get(o.id)?.current ?? 0);
           }
+          maybeTriggerPendingDropRipple(o.id, sp.texture);
           continue;
         }
 
@@ -1939,6 +2492,12 @@ void main()
           if (cur) {
             cur.texture = tex;
             ensureRoundedSpriteMask(cur);
+            const v = extractHtmlVideoElementFromTexture(cur.texture);
+            if (v) {
+              videoElByObjectIdRef.current.set(o.id, v);
+            } else {
+              videoElByObjectIdRef.current.delete(o.id);
+            }
             const w = cur.texture?.orig?.width ?? 0;
             const h = cur.texture?.orig?.height ?? 0;
             if (w > 0 && h > 0) {
@@ -1947,6 +2506,7 @@ void main()
               const lift = shadowLiftByObjectIdRef.current.get(o.id)?.current ?? 0;
               if (shCur) drawSoftShadow(shCur, w, h, r, lift);
             }
+            maybeTriggerPendingDropRipple(o.id, cur.texture);
           }
         }).catch(() => {
           // leave placeholder; error already logged
@@ -1969,59 +2529,6 @@ void main()
     const rx = ((e.clientX - rect.left) * app.renderer.width) / rect.width;
     const ry = ((e.clientY - rect.top) * app.renderer.height) / rect.height;
     const worldPoint = world.toLocal(new PIXI.Point(rx, ry));
-
-    // Visual feedback: ripple starts at the drop location and matches the dropped image aspect ratio (when possible).
-    let didTriggerRipple = false;
-    const readFileAspect = async (file: File): Promise<number | null> => {
-      try {
-        if (typeof (globalThis as any).createImageBitmap === "function") {
-          const bmp = await (globalThis as any).createImageBitmap(file);
-          const w = Number(bmp?.width ?? 0);
-          const h = Number(bmp?.height ?? 0);
-          try {
-            bmp?.close?.();
-          } catch {
-            // ignore
-          }
-          if (w > 0 && h > 0) return w / h;
-        }
-      } catch {
-        // ignore
-      }
-
-      // Fallback: HTMLImageElement
-      try {
-        const url = URL.createObjectURL(file);
-        const aspect = await new Promise<number | null>((resolve) => {
-          const img = new Image();
-          img.onload = () => {
-            const w = Number(img.naturalWidth || 0);
-            const h = Number(img.naturalHeight || 0);
-            resolve(w > 0 && h > 0 ? w / h : null);
-          };
-          img.onerror = () => resolve(null);
-          img.src = url;
-        });
-        try {
-          URL.revokeObjectURL(url);
-        } catch {
-          // ignore
-        }
-        return aspect;
-      } catch {
-        return null;
-      }
-    };
-
-    const firstImage = files.find((f) => (f.type || "").startsWith("image/")) ?? null;
-    if (firstImage) {
-      void readFileAspect(firstImage).then((shapeAspect) => {
-        if (didTriggerRipple) return;
-        if (!shapeAspect || !Number.isFinite(shapeAspect)) return;
-        didTriggerRipple = true;
-        triggerRippleAtRendererPoint(rx, ry, { shapeAspect, shapeRotation: 0 });
-      });
-    }
 
     const form = new FormData();
     for (const f of files) form.append("files", f, f.name);
@@ -2046,16 +2553,6 @@ void main()
 
     const data = (await res.json()) as { assets: AssetWithAi[] };
     const uploaded = data.assets || [];
-
-    // If we couldn't infer aspect from the File, use the server-provided dimensions (if available).
-    if (!didTriggerRipple) {
-      const a0 = uploaded[0];
-      const w = Number(a0?.width ?? 0);
-      const h = Number(a0?.height ?? 0);
-      const shapeAspect = w > 0 && h > 0 ? w / h : 1;
-      didTriggerRipple = true;
-      triggerRippleAtRendererPoint(rx, ry, { shapeAspect, shapeRotation: 0 });
-    }
     setAssets((prev) => {
       const next = [...uploaded, ...prev];
       // de-dupe by id
@@ -2067,12 +2564,18 @@ void main()
       });
     });
 
+    const newIds = uploaded.map(() => uuid());
+    if (newIds.length > 0) {
+      pendingDropRippleRef.current = { objectId: newIds[0], rx, ry, fired: false };
+    }
+    const nowIso = new Date().toISOString();
     setObjects((prev) => {
       const next = [...prev];
       let z = prev.reduce((m, o) => Math.max(m, o.z_index), 0) + 1;
-      for (const a of uploaded) {
+      for (let i = 0; i < uploaded.length; i++) {
+        const a = uploaded[i]!;
         next.push({
-          id: uuid(),
+          id: newIds[i]!,
           project_id: props.projectId,
           type: "image",
           asset_id: a.id,
@@ -2085,8 +2588,8 @@ void main()
           height: a.height ?? null,
           z_index: z++,
           props_json: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: nowIso,
+          updated_at: nowIso,
         });
       }
       scheduleEmitObjectsChange(next);
@@ -2100,8 +2603,24 @@ void main()
       ref={containerRef}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}
-      className="h-full w-full"
+      className="relative h-full w-full"
     >
+      {!syncUi.online || syncUi.syncing || syncUi.dirtyCanvas || syncUi.dirtyView ? (
+        <div className="pointer-events-none absolute left-4 top-4 z-50">
+          <div
+            className={
+              "rounded-full border px-3 py-1 text-[11px] font-medium " +
+              (!syncUi.online
+                ? "border-red-900/50 bg-red-950/50 text-red-200"
+                : syncUi.syncing
+                  ? "border-amber-900/40 bg-amber-950/35 text-amber-200"
+                  : "border-amber-900/40 bg-amber-950/35 text-amber-200")
+            }
+          >
+            {!syncUi.online ? "Offline" : syncUi.syncing ? "Syncing…" : "Unsynced"}
+          </div>
+        </div>
+      ) : null}
       {dropError ? (
         <div className="pointer-events-none absolute left-1/2 top-10 -translate-x-1/2 rounded-lg border border-red-900/50 bg-red-950/60 px-3 py-2 text-xs text-red-200">
           {dropError}

@@ -1,0 +1,19 @@
+[package]
+name = "moondream-desktop"
+version = "0.1.0"
+description = "Moondream desktop wrapper (Tauri + local Next.js server)"
+authors = ["Moondream"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "1.6", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+

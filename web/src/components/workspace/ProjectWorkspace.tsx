@@ -46,8 +46,8 @@ export function ProjectWorkspace(props: {
       />
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-40 h-14 bg-gradient-to-b from-black/50 to-transparent" />
-      <div className="absolute left-1/2 top-3 z-50 -translate-x-1/2">
-        <ProjectDropdown currentProjectId={project.id} variant="text" align="center" />
+      <div className="absolute left-3 top-3 z-50">
+        <ProjectDropdown currentProjectId={project.id} variant="text" align="left" />
       </div>
 
       <AssetCommandPalette

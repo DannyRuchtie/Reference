@@ -1,0 +1,16 @@
+{
+  "name": "desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "check:bundled-node": "node scripts/check-bundled-node.mjs",
+    "prepare:next": "node scripts/prepare-next.mjs",
+    "dev": "tauri dev",
+    "build": "node scripts/prepare-next.mjs && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.6.0"
+  }
+}
+
+

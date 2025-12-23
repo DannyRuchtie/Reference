@@ -1,0 +1,91 @@
+# Desktop (macOS) wrapper — Option A (Tauri + local Next.js server)
+
+This folder adds a **standalone desktop app** wrapper around the existing Next.js + PixiJS app by:
+
+- Bundling the built Next.js server output (`next.config.ts` uses `output: "standalone"`)
+- Launching it locally on `127.0.0.1:<random_port>` at app start
+- Loading the UI in a Tauri webview
+- Storing all data under a writable per-user directory via `MOONDREAM_DATA_DIR`
+
+## Prereqs (local machine)
+
+- Node.js 20+
+- Rust toolchain (stable): `rustup` + Xcode command line tools
+
+## Dev flow
+
+Run the web app as usual:
+
+```bash
+cd web
+npm run dev
+```
+
+Then in another terminal:
+
+```bash
+cd desktop
+npm install
+npm run dev
+```
+
+In dev mode, the Tauri window points at `http://localhost:3000` and does **not** spawn a bundled server.
+
+## Production build (desktop app)
+
+### 0) Install system prereqs (one time)
+
+On macOS:
+
+```bash
+xcode-select --install
+```
+
+Install Rust (stable) via rustup (recommended):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Restart your terminal so `cargo` is on PATH.
+
+### 1) Bundle Node (Apple Silicon only)
+
+This desktop build is intended to be **truly standalone** (users do not need Node installed).
+
+Copy a macOS **arm64** Node binary into:
+
+```text
+desktop/src-tauri/resources/bin/node
+```
+
+Quick way (uses your current Node installation):
+
+```bash
+cp "$(command -v node)" desktop/src-tauri/resources/bin/node
+chmod +x desktop/src-tauri/resources/bin/node
+```
+
+(Recommended) Better way: download a Node.js macOS arm64 release (v20) and copy its `bin/node` here.
+
+### 2) Build the app
+
+```bash
+cd desktop
+npm install
+npm run build
+```
+
+`npm run build` will:
+
+1. Build the Next.js app in `../web`
+2. Copy the Next standalone output into `desktop/src-tauri/resources/next`
+3. Build the Tauri app bundle
+
+### Bundling Node (for a truly standalone app)
+
+The build will fail unless `desktop/src-tauri/resources/bin/node` exists and is executable.
+
+See `desktop/src-tauri/resources/bin/README.md` for details.
+
+

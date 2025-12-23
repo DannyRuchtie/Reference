@@ -58,6 +58,7 @@ export function AssetLightbox(props: {
   onClose: () => void;
 }) {
   const { asset, projectId, onClose } = props;
+  const isVideo = !!asset.mime_type && asset.mime_type.startsWith("video/");
   const [entered, setEntered] = useState(false);
   const [animating, setAnimating] = useState<boolean>(!!props.originRect);
   const [segments, setSegments] = useState<Segment[] | null>(null);
@@ -232,13 +233,22 @@ export function AssetLightbox(props: {
     >
       {ghostStyle ? (
         <div style={{ ...ghostStyle, transform: ghostTransform }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={asset.storage_url}
-            alt=""
-            className="h-full w-full object-contain"
-            draggable={false}
-          />
+          {isVideo ? (
+            <video
+              src={asset.storage_url}
+              className="h-full w-full object-contain"
+              muted
+              playsInline
+            />
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={asset.storage_url}
+              alt=""
+              className="h-full w-full object-contain"
+              draggable={false}
+            />
+          )}
         </div>
       ) : null}
 
@@ -251,16 +261,26 @@ export function AssetLightbox(props: {
       >
         <div className="flex min-h-0 flex-1 items-center justify-center p-4 md:p-8">
           <div className="relative h-full w-full max-w-[min(1100px,100%)]">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              data-asset-lightbox-target="true"
-              ref={imgRef}
-              src={asset.storage_url}
-              alt={asset.original_name || "asset"}
-              className={"h-full w-full object-contain " + (animating ? "opacity-0" : "opacity-100")}
-              draggable={false}
-              onLoad={() => recomputeImageFit()}
-            />
+            {isVideo ? (
+              <video
+                data-asset-lightbox-target="true"
+                src={asset.storage_url}
+                controls
+                playsInline
+                className={"h-full w-full object-contain " + (animating ? "opacity-0" : "opacity-100")}
+              />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                data-asset-lightbox-target="true"
+                ref={imgRef}
+                src={asset.storage_url}
+                alt={asset.original_name || "asset"}
+                className={"h-full w-full object-contain " + (animating ? "opacity-0" : "opacity-100")}
+                draggable={false}
+                onLoad={() => recomputeImageFit()}
+              />
+            )}
 
             {/* Segment overlay (SVG preferred, bbox fallback) */}
             {!animating && selectedSegment && imageFit ? (

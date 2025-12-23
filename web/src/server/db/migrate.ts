@@ -1,21 +1,120 @@
-import fs from "node:fs";
-import path from "node:path";
+// NOTE: Migrations are intentionally embedded as strings so they still work when
+// the app is packaged (e.g. Next `output: 'standalone'`), where source files
+// like `src/server/db/migrations/*.sql` are not available at runtime.
+import type { Database } from "better-sqlite3";
 
-function readSqlFile(relativePathFromHere: string) {
-  // In Next.js dev, `process.cwd()` is the `web/` directory.
-  // We keep migrations in source so they can be inspected and edited easily.
-  const abs = path.resolve(process.cwd(), "src/server/db", relativePathFromHere);
-  return fs.readFileSync(abs, "utf8");
-}
+const MIGRATION_001 = `PRAGMA foreign_keys = ON;
 
-export function ensureMigrations(db: any) {
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS assets (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  original_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  storage_path TEXT NOT NULL,
+  storage_url TEXT NOT NULL,
+  thumb_path TEXT,
+  thumb_url TEXT,
+  width INTEGER,
+  height INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS assets_project_sha256_uq ON assets(project_id, sha256);
+CREATE INDEX IF NOT EXISTS assets_project_id_idx ON assets(project_id);
+
+CREATE TABLE IF NOT EXISTS asset_ai (
+  asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+  caption TEXT,
+  tags_json TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  model_version TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS canvas_objects (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+  x REAL NOT NULL DEFAULT 0,
+  y REAL NOT NULL DEFAULT 0,
+  scale_x REAL NOT NULL DEFAULT 1,
+  scale_y REAL NOT NULL DEFAULT 1,
+  rotation REAL NOT NULL DEFAULT 0,
+  width REAL,
+  height REAL,
+  z_index INTEGER NOT NULL DEFAULT 0,
+  props_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS canvas_objects_project_id_idx ON canvas_objects(project_id);
+
+-- Full-text search across filename + AI caption + tags
+CREATE VIRTUAL TABLE IF NOT EXISTS asset_search USING fts5(
+  asset_id UNINDEXED,
+  project_id UNINDEXED,
+  original_name,
+  caption,
+  tags
+);
+`;
+
+const MIGRATION_002 = `PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS project_view (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  world_x REAL NOT NULL DEFAULT 0,
+  world_y REAL NOT NULL DEFAULT 0,
+  zoom REAL NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
+const MIGRATION_003 = `PRAGMA foreign_keys = ON;
+
+-- Store caption embeddings for semantic/vector search.
+-- We keep this schema portable so it can be migrated to Supabase/pgvector later.
+CREATE TABLE IF NOT EXISTS asset_embeddings (
+  asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  embedding BLOB,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Store per-tag segmentation results so searches like "apple" can highlight on-image regions.
+-- One row per (asset_id, tag).
+CREATE TABLE IF NOT EXISTS asset_segments (
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  tag TEXT NOT NULL,
+  svg TEXT,
+  bbox_json TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (asset_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS asset_segments_tag_idx ON asset_segments(tag);
+`;
+
+export function ensureMigrations(db: Database) {
   db.pragma("foreign_keys = ON");
 
   const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
   let current = row?.user_version ?? 0;
 
   if (current < 1) {
-    const sql = readSqlFile("./migrations/001_init.sql");
+    const sql = MIGRATION_001;
     db.exec("BEGIN");
     try {
       db.exec(sql);
@@ -29,7 +128,7 @@ export function ensureMigrations(db: any) {
   }
 
   if (current < 2) {
-    const sql = readSqlFile("./migrations/002_project_view.sql");
+    const sql = MIGRATION_002;
     db.exec("BEGIN");
     try {
       db.exec(sql);
@@ -43,7 +142,7 @@ export function ensureMigrations(db: any) {
   }
 
   if (current < 3) {
-    const sql = readSqlFile("./migrations/003_ai_vectors_segments.sql");
+    const sql = MIGRATION_003;
     db.exec("BEGIN");
     try {
       db.exec(sql);

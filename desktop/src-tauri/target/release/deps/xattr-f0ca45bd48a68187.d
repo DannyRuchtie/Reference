@@ -1,0 +1,11 @@
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/xattr-f0ca45bd48a68187.d: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/lib.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/error.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/mod.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/util.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/linux_macos.rs
+
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/libxattr-f0ca45bd48a68187.rlib: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/lib.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/error.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/mod.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/util.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/linux_macos.rs
+
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/libxattr-f0ca45bd48a68187.rmeta: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/lib.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/error.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/mod.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/util.rs /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/linux_macos.rs
+
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/lib.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/error.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/mod.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/util.rs:
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xattr-1.6.1/src/sys/linux_macos.rs:

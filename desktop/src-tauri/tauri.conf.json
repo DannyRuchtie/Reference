@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/tooling/cli/schema.json",
+  "build": {
+    "devPath": "http://localhost:3000",
+    "distDir": "../ui"
+  },
+  "package": {
+    "productName": "Moondream",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false
+    },
+    "bundle": {
+      "active": true,
+      "identifier": "com.moondream.desktop",
+      "resources": [
+        "resources/next/server.js",
+        "resources/next/package.json",
+        "resources/next/public",
+        "resources/next/node_modules",
+        "resources/next/.next",
+        "resources/bin/node",
+        "resources/bin/README.md"
+      ]
+    },
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "Moondream",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ]
+  }
+}
+
+

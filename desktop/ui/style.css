@@ -1,0 +1,76 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica,
+    Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  background: radial-gradient(1200px 600px at 30% 20%, #1b2537 0%, #0b0f17 55%, #070a10 100%);
+  color: #e6edf7;
+}
+
+.wrap {
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.card {
+  width: min(520px, 92vw);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 22px 22px 18px;
+  background: rgba(15, 22, 35, 0.7);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.sub {
+  margin-top: 6px;
+  font-size: 13px;
+  color: rgba(230, 237, 247, 0.72);
+}
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  margin-top: 14px;
+  border-radius: 999px;
+  border: 2px solid rgba(230, 237, 247, 0.18);
+  border-top-color: rgba(230, 237, 247, 0.85);
+  animation: spin 900ms linear infinite;
+}
+
+.err {
+  white-space: pre-wrap;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 0, 80, 0.08);
+  border: 1px solid rgba(255, 0, 80, 0.25);
+  color: rgba(255, 210, 224, 0.95);
+  font-size: 12.5px;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
