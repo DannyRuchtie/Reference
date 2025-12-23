@@ -1,0 +1,7 @@
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/smallvec-10d2d408f459aa1a.d: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/smallvec-1.15.1/src/lib.rs
+
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/libsmallvec-10d2d408f459aa1a.rlib: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/smallvec-1.15.1/src/lib.rs
+
+/Users/dannyruchtie/Documents/moondream/desktop/src-tauri/target/release/deps/libsmallvec-10d2d408f459aa1a.rmeta: /Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/smallvec-1.15.1/src/lib.rs
+
+/Users/dannyruchtie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/smallvec-1.15.1/src/lib.rs:
