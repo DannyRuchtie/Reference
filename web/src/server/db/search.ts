@@ -41,6 +41,11 @@ export function upsertAssetSearchRow(args: {
   tx();
 }
 
+export function deleteAssetSearchRow(assetId: string) {
+  const db = getDb();
+  db.prepare("DELETE FROM asset_search WHERE asset_id = ?").run(assetId);
+}
+
 export function searchAssets(args: {
   projectId: string;
   query: string;

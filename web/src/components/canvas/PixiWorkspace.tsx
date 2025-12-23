@@ -5,6 +5,10 @@ import * as PIXI from "pixi.js";
 
 import type { AssetWithAi, CanvasObjectRow } from "@/server/db/types";
 
+// Theme color used for the *viewport region* indicator inside the minimap.
+// Keep this aligned with the app's visual language (matches the existing selection blue).
+const THEME_ACCENT = 0x60a5fa; // blue-400
+
 function uuid() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
@@ -69,6 +73,7 @@ export function PixiWorkspace(props: {
     bg: PIXI.Graphics;
     items: PIXI.Container;
     spriteById: Map<string, PIXI.Sprite>;
+    shade: PIXI.Graphics;
     overlay: PIXI.Graphics;
     viewport: PIXI.Graphics;
     showUntilMs: number;
@@ -136,6 +141,18 @@ export function PixiWorkspace(props: {
     }, 250);
   };
 
+  const saveNow = async (nextObjects: CanvasObjectRow[]) => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    await fetch(`/api/projects/${props.projectId}/canvas`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ objects: nextObjects }),
+    }).catch(() => {});
+  };
+
   const scheduleViewSave = (view: { world_x: number; world_y: number; zoom: number }) => {
     if (viewSaveTimer.current) window.clearTimeout(viewSaveTimer.current);
     viewSaveTimer.current = window.setTimeout(async () => {
@@ -174,13 +191,52 @@ export function PixiWorkspace(props: {
       if (!ids || ids.length === 0) return;
       e.preventDefault();
       setSelectedIds([]);
+      let nextObjects: CanvasObjectRow[] | null = null;
+      let assetsToDelete: string[] = [];
       setObjects((prev) => {
         const remove = new Set(ids);
         const next = prev.filter((o) => !remove.has(o.id));
+
+        // Determine which underlying assets can be deleted safely:
+        // only delete an asset if ALL objects referencing it are being removed.
+        const removedAssetIds = new Set<string>();
+        for (const o of prev) {
+          if (!remove.has(o.id)) continue;
+          if (o.type !== "image") continue;
+          if (!o.asset_id) continue;
+          removedAssetIds.add(o.asset_id);
+        }
+
+        const remainingAssetIds = new Set<string>();
+        for (const o of next) {
+          if (o.type !== "image") continue;
+          if (!o.asset_id) continue;
+          remainingAssetIds.add(o.asset_id);
+        }
+
+        assetsToDelete = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
+        nextObjects = next;
+
         scheduleEmitObjectsChange(next);
-        scheduleSave(next);
+        // We'll save immediately so DB references are updated before deleting assets.
+        // (Avoids 409 due to stale canvas_objects rows.)
         return next;
       });
+
+      // Persist the canvas update immediately, then delete assets from DB (and disk).
+      // Fire-and-forget for snappy UX.
+      window.setTimeout(async () => {
+        if (!nextObjects) return;
+        await saveNow(nextObjects);
+
+        if (assetsToDelete.length) {
+          for (const assetId of assetsToDelete) {
+            await fetch(`/api/assets/${assetId}`, { method: "DELETE" }).catch(() => {});
+          }
+          // Optimistically remove from local asset cache (drag/drop + minimap textures).
+          setAssets((prev) => prev.filter((a) => !assetsToDelete.includes(a.id)));
+        }
+      }, 0);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -231,7 +287,8 @@ export function PixiWorkspace(props: {
       minimapBg.roundRect(0, 0, minimapW, minimapH, 10);
       // Higher contrast minimap background.
       minimapBg.fill({ color: 0x09090b, alpha: 0.88 });
-      minimapBg.stroke({ color: 0x52525b, width: 1, alpha: 0.95 });
+      // Subtle white border (10% opacity). Viewport indicator uses accent color.
+      minimapBg.stroke({ color: 0xffffff, width: 1, alpha: 0.1 });
       minimapContainer.addChild(minimapBg);
 
       // Clip (overflow hidden) so the viewport outline can't render outside the minimap box.
@@ -249,10 +306,14 @@ export function PixiWorkspace(props: {
 
       // Layer order inside the minimap:
       // 1) item sprites (preview)
-      // 2) overlay (optional outlines)
-      // 3) viewport border
+      // 2) shade outside viewport (helps show what is visible)
+      // 3) overlay (optional outlines)
+      // 4) viewport border
       const minimapItems = new PIXI.Container();
       minimapClipLayer.addChild(minimapItems);
+
+      const minimapShade = new PIXI.Graphics();
+      minimapClipLayer.addChild(minimapShade);
 
       const minimapOverlay = new PIXI.Graphics();
       minimapClipLayer.addChild(minimapOverlay);
@@ -265,6 +326,7 @@ export function PixiWorkspace(props: {
         bg: minimapBg,
         items: minimapItems,
         spriteById: new Map(),
+        shade: minimapShade,
         overlay: minimapOverlay,
         viewport: minimapViewport,
         showUntilMs: 0,
@@ -570,7 +632,11 @@ export function PixiWorkspace(props: {
         // Draw box in local coords, so it matches sprite transform.
         selectionBox.clear();
         selectionBox.rect(-baseW / 2, -baseH / 2, baseW, baseH);
-        selectionBox.stroke({ width: 2 / Math.max(0.0001, sprite.scale.x), color: 0x60a5fa, alpha: 0.9 });
+        selectionBox.stroke({
+          width: 2 / Math.max(0.0001, sprite.scale.x),
+          color: 0x60a5fa,
+          alpha: 0.9,
+        });
 
         const handleSize = 10 / Math.max(0.0001, sprite.scale.x);
         const pts = handleLocalPoints(baseW, baseH);
@@ -738,19 +804,66 @@ export function PixiWorkspace(props: {
           }
         }
 
-        // Draw viewport rectangle (visible world region)
+        // Draw viewport indication (what is visible)
         mm.viewport.clear();
         const vx0 = wxToMx(topLeftWorld.x);
         const vy0 = wyToMy(topLeftWorld.y);
         const vx1 = wxToMx(bottomRightWorld.x);
         const vy1 = wyToMy(bottomRightWorld.y);
-        const rx = Math.min(vx0, vx1);
-        const ry = Math.min(vy0, vy1);
-        const rw = Math.abs(vx1 - vx0);
-        const rh = Math.abs(vy1 - vy0);
-        // High-contrast viewport indicator (blue border)
-        mm.viewport.lineStyle(3, 0x38bdf8, 1);
+        const rxRaw = Math.min(vx0, vx1);
+        const ryRaw = Math.min(vy0, vy1);
+        const rwRaw = Math.abs(vx1 - vx0);
+        const rhRaw = Math.abs(vy1 - vy0);
+
+        // Constrain viewport rect to the minimap inner bounds so stroke doesn't get clipped away.
+        const innerX0 = pad;
+        const innerY0 = pad;
+        const innerX1 = pad + innerW;
+        const innerY1 = pad + innerH;
+        const x0 = clamp(rxRaw, innerX0, innerX1);
+        const y0 = clamp(ryRaw, innerY0, innerY1);
+        const x1 = clamp(rxRaw + rwRaw, innerX0, innerX1);
+        const y1 = clamp(ryRaw + rhRaw, innerY0, innerY1);
+        const rx = Math.min(x0, x1);
+        const ry = Math.min(y0, y1);
+        const rw = Math.max(0, Math.abs(x1 - x0));
+        const rh = Math.max(0, Math.abs(y1 - y0));
+
+        // Shade everything outside the viewport (makes the visible area obvious).
+        mm.shade.clear();
+        mm.shade.beginFill(0x000000, 0.28);
+        // top
+        mm.shade.drawRect(innerX0, innerY0, innerW, Math.max(0, ry - innerY0));
+        // bottom
+        mm.shade.drawRect(innerX0, ry + rh, innerW, Math.max(0, innerY1 - (ry + rh)));
+        // left
+        mm.shade.drawRect(innerX0, ry, Math.max(0, rx - innerX0), rh);
+        // right
+        mm.shade.drawRect(rx + rw, ry, Math.max(0, innerX1 - (rx + rw)), rh);
+        mm.shade.endFill();
+
+        // High-contrast viewport border (draw inset so it's not clipped by the mask).
+        const stroke = 3;
+        const inset = stroke / 2;
+        // Theme-tinted visible area + theme border.
+        mm.viewport.beginFill(THEME_ACCENT, 0.07);
         mm.viewport.drawRect(rx, ry, rw, rh);
+        mm.viewport.endFill();
+        // Add a subtle "glow" so the outline stays visible over thumbnails.
+        mm.viewport.lineStyle(stroke + 4, THEME_ACCENT, 0.22);
+        mm.viewport.drawRect(
+          rx + (inset + 2),
+          ry + (inset + 2),
+          Math.max(0, rw - (stroke + 4)),
+          Math.max(0, rh - (stroke + 4))
+        );
+        mm.viewport.lineStyle(stroke, THEME_ACCENT, 1);
+        mm.viewport.drawRect(
+          rx + inset,
+          ry + inset,
+          Math.max(0, rw - stroke),
+          Math.max(0, rh - stroke)
+        );
       };
 
       app.ticker.add(() => {

@@ -1,6 +1,6 @@
 import type { AssetRow, AssetWithAi } from "./types";
 import { getDb } from "./db";
-import { upsertAssetSearchRow } from "./search";
+import { deleteAssetSearchRow, upsertAssetSearchRow } from "./search";
 
 export function findAssetByProjectSha(projectId: string, sha256: string): AssetRow | null {
   const db = getDb();
@@ -136,6 +136,26 @@ export function getAsset(assetId: string): AssetWithAi | null {
       )
       .get(assetId) as AssetWithAi | undefined) ?? null
   );
+}
+
+export function countCanvasObjectsReferencingAsset(assetId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COUNT(1) AS c FROM canvas_objects WHERE asset_id = ?")
+    .get(assetId) as { c: number } | undefined;
+  return row?.c ?? 0;
+}
+
+export function deleteAsset(assetId: string): boolean {
+  const db = getDb();
+  const delAsset = db.prepare("DELETE FROM assets WHERE id = ?");
+  const tx = db.transaction(() => {
+    // FTS table has no FK; clean it up explicitly.
+    deleteAssetSearchRow(assetId);
+    const info = delAsset.run(assetId) as unknown as { changes?: number };
+    return (info?.changes ?? 0) > 0;
+  });
+  return tx();
 }
 
 
