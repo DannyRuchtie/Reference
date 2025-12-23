@@ -1,6 +1,7 @@
 import { getProject } from "@/server/db/projects";
 import { listAssets } from "@/server/db/assets";
 import { getCanvasObjects, getProjectView } from "@/server/db/canvas";
+import { setLastOpenedProjectId } from "@/server/db/appState";
 import { ProjectWorkspace } from "@/components/workspace/ProjectWorkspace";
 import type { Metadata } from "next";
 
@@ -18,6 +19,10 @@ export async function generateMetadata(
 
 export default async function ProjectPage(props: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await props.params;
+
+  // Persist last-opened project so the desktop app can reopen where you left off.
+  // (Stored in SQLite, so it survives desktop port changes across launches.)
+  setLastOpenedProjectId(projectId);
 
   const project = getProject(projectId);
   if (!project) {

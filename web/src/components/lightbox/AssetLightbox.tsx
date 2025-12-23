@@ -61,11 +61,14 @@ export function AssetLightbox(props: {
   const isVideo = !!asset.mime_type && asset.mime_type.startsWith("video/");
   const [entered, setEntered] = useState(false);
   const [animating, setAnimating] = useState<boolean>(!!props.originRect);
+  const closingRef = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const openFinishTimerRef = useRef<number | null>(null);
   const [segments, setSegments] = useState<Segment[] | null>(null);
   const [selectedSegmentTag, setSelectedSegmentTag] = useState<string | null>(null);
-  const [targetRect, setTargetRect] = useState<OriginRect | null>(null);
   const [ghostStyle, setGhostStyle] = useState<React.CSSProperties | null>(null);
   const [ghostTransform, setGhostTransform] = useState<string>("translate(0px,0px) scale(1,1)");
+  const targetRectRef = useRef<OriginRect | null>(null);
 
   const tags = useMemo(() => safeParseTagsJson(asset.ai_tags_json), [asset.ai_tags_json]);
 
@@ -90,12 +93,91 @@ export function AssetLightbox(props: {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+      if (openFinishTimerRef.current) window.clearTimeout(openFinishTimerRef.current);
+    };
+  }, []);
+
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+
+    // Prevent the "open" finish timer from clobbering our close animation if the user closes quickly.
+    if (openFinishTimerRef.current) {
+      window.clearTimeout(openFinishTimerRef.current);
+      openFinishTimerRef.current = null;
+    }
+
+    // Start fade/scale-out immediately.
+    setEntered(false);
+
+    const origin = props.originRect ?? null;
+
+    // If we don't have an origin rect, keep existing behavior (fade out then unmount).
+    if (!origin) {
+      onClose();
+      return;
+    }
+
+    const measureTarget = (): OriginRect | null => {
+      const el = document.querySelector("[data-asset-lightbox-target='true']") as HTMLElement | null;
+      if (!el) return targetRectRef.current;
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 2 && r.height > 2)) return targetRectRef.current;
+      return { left: r.left, top: r.top, width: r.width, height: r.height };
+    };
+
+    const target = measureTarget();
+    if (!target) {
+      onClose();
+      return;
+    }
+
+    // Hide the "real" image while we animate the ghost back.
+    setAnimating(true);
+
+    setGhostStyle({
+      position: "fixed",
+      left: target.left,
+      top: target.top,
+      width: target.width,
+      height: target.height,
+      zIndex: 10000,
+      pointerEvents: "none",
+      transition: "transform 240ms cubic-bezier(0.2, 0.9, 0.2, 1), opacity 140ms ease-out",
+      transformOrigin: "center center",
+      opacity: 1,
+    });
+
+    // Start at target.
+    setGhostTransform("translate(0px, 0px) scale(1, 1)");
+
+    const ocx = origin.left + origin.width / 2;
+    const ocy = origin.top + origin.height / 2;
+    const tcx = target.left + target.width / 2;
+    const tcy = target.top + target.height / 2;
+    const dx = ocx - tcx;
+    const dy = ocy - tcy;
+    const sx = origin.width / target.width;
+    const sy = origin.height / target.height;
+
+    // Then transition to origin transform on next frame.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => setGhostTransform(`translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`));
+    });
+
+    // Unmount after the flip finishes (leave a small buffer vs CSS duration).
+    closeTimerRef.current = window.setTimeout(() => onClose(), 260);
+  }, [onClose, props.originRect]);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [requestClose]);
 
   useEffect(() => {
     let cancelled = false;
@@ -159,7 +241,6 @@ export function AssetLightbox(props: {
     if (!origin) {
       setAnimating(false);
       setGhostStyle(null);
-      setTargetRect(null);
       return;
     }
 
@@ -177,7 +258,7 @@ export function AssetLightbox(props: {
       }
 
       const target: OriginRect = { left: tr.left, top: tr.top, width: tr.width, height: tr.height };
-      setTargetRect(target);
+      targetRectRef.current = target;
 
       // Create a ghost layer *at the target position*, then transform it so it visually matches origin,
       // then transition transform back to identity.
@@ -212,9 +293,10 @@ export function AssetLightbox(props: {
       });
 
       // End animation.
-      window.setTimeout(() => {
+      openFinishTimerRef.current = window.setTimeout(() => {
         setAnimating(false);
         setGhostStyle(null);
+        openFinishTimerRef.current = null;
       }, 260);
     }, 0);
 
@@ -227,7 +309,7 @@ export function AssetLightbox(props: {
         "fixed inset-0 z-[9999] bg-black transition-opacity duration-200 " +
         (entered ? "opacity-100" : "opacity-0")
       }
-      onClick={() => onClose()}
+      onClick={() => requestClose()}
       aria-modal="true"
       role="dialog"
     >
@@ -350,10 +432,13 @@ export function AssetLightbox(props: {
               </div>
             </div>
             <button
-              onClick={() => onClose()}
-              className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-200 hover:bg-black/50"
+              onClick={() => requestClose()}
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-black/30 text-zinc-200 hover:bg-black/50 focus:outline-none focus:ring-2 focus:ring-violet-400/50"
+              aria-label="Close"
             >
-              Close
+              <span aria-hidden="true" className="text-lg leading-none">
+                ×
+              </span>
             </button>
           </div>
 

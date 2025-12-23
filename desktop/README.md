@@ -82,6 +82,40 @@ npm run build
 2. Copy the Next standalone output into `desktop/src-tauri/resources/next`
 3. Build the Tauri app bundle
 
+### Output location
+
+After a successful build, the `.app` bundle is written to:
+
+```text
+desktop/src-tauri/target/release/bundle/macos/Moondream.app
+```
+
+### Optional: create a simple DMG (recommended, reliable)
+
+Tauri's "fancy" DMG bundling (Finder layout AppleScript) can occasionally fail to unmount on macOS.
+This creates a simple DMG that works reliably:
+
+```bash
+APP="/Users/$USER/Documents/moondream/desktop/src-tauri/target/release/bundle/macos/Moondream.app"
+OUT="/Users/$USER/Documents/moondream/desktop/src-tauri/target/release/bundle/dmg/Moondream_aarch64-simple.dmg"
+mkdir -p "$(dirname "$OUT")"
+rm -f "$OUT"
+hdiutil create -volname "Moondream" -srcfolder "$APP" -ov -format UDZO "$OUT"
+echo "DMG written to: $OUT"
+```
+
+### Data location (desktop)
+
+In the packaged desktop app, all local-first data lives under:
+
+```text
+~/Library/Application Support/com.moondream.desktop/data/
+```
+
+- `.../moondream.sqlite3` (DB)
+- `.../projects/<projectId>/assets/` (images)
+- `.../projects/<projectId>/thumbs/` (thumbnails)
+
 ### Bundling Node (for a truly standalone app)
 
 The build will fail unless `desktop/src-tauri/resources/bin/node` exists and is executable.

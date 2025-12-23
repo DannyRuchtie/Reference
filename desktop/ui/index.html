@@ -17,6 +17,12 @@
     </div>
 
     <script>
+      // Optional global injected by Rust (production build).
+      // eslint-disable-next-line no-unused-vars
+      const __MOONDREAM_PORT__ = 0;
+      // Optional log hint injected by Rust (production build).
+      // eslint-disable-next-line no-unused-vars
+      const __MOONDREAM_LOG_HINT__ = "";
       const errEl = document.getElementById("err");
 
       function showErr(msg) {
@@ -29,27 +35,16 @@
       }
 
       async function getPort() {
+        // In production, Rust injects `window.__MOONDREAM_PORT__` via `window.eval(...)`.
+        const injected = window.__MOONDREAM_PORT__;
+        if (typeof injected === "number" && injected > 0) return injected;
+
+        // Fallback (older builds): if Tauri JS API is present, query via invoke.
         if (!window.__TAURI__?.invoke) return null;
         try {
           return await window.__TAURI__.invoke("server_port");
         } catch {
           return null;
-        }
-      }
-
-      async function waitForHealth(port, { timeoutMs = 45000 } = {}) {
-        const base = `http://127.0.0.1:${port}`;
-        const start = Date.now();
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          if (Date.now() - start > timeoutMs) return false;
-          try {
-            const r = await fetch(`${base}/api/health`, { cache: "no-store" });
-            if (r.ok) return true;
-          } catch {
-            // ignore
-          }
-          await sleep(250);
         }
       }
 
@@ -68,16 +63,13 @@
           return;
         }
 
-        const ok = await waitForHealth(port);
-        if (!ok) {
-          showErr(
-            `Local server did not become ready. Try restarting the app.\n(Waiting on http://127.0.0.1:${port})`
-          );
-          return;
-        }
-
-        // Navigate to the real app.
-        window.location.replace(`http://127.0.0.1:${port}/`);
+        // IMPORTANT:
+        // The loading page runs on a non-http origin (tauri://), and some WebViews treat
+        // `fetch(http://127.0.0.1:PORT/...)` as mixed-content and block it.
+        // So we do a direct navigation to the local server; it should be ready quickly.
+        const url = `http://127.0.0.1:${port}/`;
+        await sleep(120);
+        window.location.replace(url);
       })();
     </script>
   </body>

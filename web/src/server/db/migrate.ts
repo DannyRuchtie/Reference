@@ -107,6 +107,17 @@ CREATE TABLE IF NOT EXISTS asset_segments (
 CREATE INDEX IF NOT EXISTS asset_segments_tag_idx ON asset_segments(tag);
 `;
 
+const MIGRATION_004 = `PRAGMA foreign_keys = ON;
+
+-- Small key/value store for local app state (desktop + local-first web).
+-- Used for "reopen last project" on launch.
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
 export function ensureMigrations(db: Database) {
   db.pragma("foreign_keys = ON");
 
@@ -147,6 +158,20 @@ export function ensureMigrations(db: Database) {
     try {
       db.exec(sql);
       db.exec("PRAGMA user_version = 3");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+    current = 3;
+  }
+
+  if (current < 4) {
+    const sql = MIGRATION_004;
+    db.exec("BEGIN");
+    try {
+      db.exec(sql);
+      db.exec("PRAGMA user_version = 4");
       db.exec("COMMIT");
     } catch (err) {
       db.exec("ROLLBACK");

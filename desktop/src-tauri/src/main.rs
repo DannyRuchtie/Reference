@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::{io, io::ErrorKind};
+use std::{fs::OpenOptions};
 
 use serde::Serialize;
 use tauri::Manager;
@@ -73,6 +74,16 @@ fn spawn_next_server(app: &tauri::AppHandle, port: u16) -> io::Result<Child> {
     .join("data");
   std::fs::create_dir_all(&data_dir)?;
 
+  // Log server output so "server not ready" errors are debuggable in standalone builds.
+  let log_dir = data_dir.join("logs");
+  std::fs::create_dir_all(&log_dir)?;
+  let server_log_path = log_dir.join("next-server.log");
+  let log_file = OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(&server_log_path)?;
+  let log_file_err = log_file.try_clone()?;
+
   let mut cmd = Command::new(node);
   cmd
     .current_dir(&next_dir)
@@ -80,12 +91,13 @@ fn spawn_next_server(app: &tauri::AppHandle, port: u16) -> io::Result<Child> {
     .env("HOSTNAME", "127.0.0.1")
     .env("PORT", port.to_string())
     .env("NODE_ENV", "production")
+    .env("NEXT_TELEMETRY_DISABLED", "1")
     .env("MOONDREAM_DATA_DIR", &data_dir)
     // Ensure the Node server and the Python worker (if used) can share the same DB file.
     .env("MOONDREAM_DB_PATH", data_dir.join("moondream.sqlite3"))
     .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    .stdout(Stdio::from(log_file))
+    .stderr(Stdio::from(log_file_err));
 
   cmd.spawn()
 }
@@ -118,6 +130,19 @@ fn main() {
 
       // Nudge the internal loading page so it can redirect as soon as health is ready.
       if let Some(window) = app.get_window("main") {
+        // The initial `ui/index.html` is plain HTML and does not import @tauri-apps/api.
+        // Provide the chosen port via a global so the page can poll `/api/health` and redirect
+        // without relying on `window.__TAURI__.invoke(...)` being present.
+        let _ = window.eval(&format!("window.__MOONDREAM_PORT__ = {};", port));
+        // Helpful for debugging if the local server never becomes ready.
+        let _ = window.eval(
+          &format!(
+            "window.__MOONDREAM_LOG_HINT__ = \"~/Library/Application Support/{}/data/logs/next-server.log\";",
+            "com.moondream.desktop"
+          )
+        );
+
+        // Keep emitting too (useful if we later switch to a JS listener).
         let _ = window.emit("moondream://server-ready", ServerInfo { port });
       }
 

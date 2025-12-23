@@ -11,7 +11,8 @@ body {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica,
     Arial, "Apple Color Emoji", "Segoe UI Emoji";
-  background: radial-gradient(1200px 600px at 30% 20%, #1b2537 0%, #0b0f17 55%, #070a10 100%);
+  /* Keep the loading screen truly dark (no blue tint) */
+  background: #000;
   color: #e6edf7;
 }
 

@@ -58,6 +58,10 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
+## Build the standalone macOS desktop app (Apple Silicon)
+
+See `desktop/README.md` for the up-to-date build steps (bundles Node + Next server inside a Tauri app).
+
 > `npm run dev` starts both Next.js and `moondream-station` (if installed). You may need to type `start` inside the Moondream Station REPL to start the REST API.
 
 ## Install Moondream Station (local)

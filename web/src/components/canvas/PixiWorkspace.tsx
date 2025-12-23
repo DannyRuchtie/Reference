@@ -119,6 +119,14 @@ function redrawMinimapBackground(
 const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 1.0;
 
+// Interaction tuning:
+// - When very zoomed out, clicking an image should "zoom in" (similar to Space focus-zoom).
+// - Double click should only open the fullscreen/lightbox view when reasonably zoomed in.
+const CLICK_TO_FOCUS_MAX_ZOOM = 0.18;
+const TAP_MAX_MOVE_PX = 6; // renderer-space px
+const SUPPRESS_DBLCLICK_AFTER_FOCUS_MS = 450;
+const FULLSCREEN_DBLCLICK_FIT_FACTOR = 0.75; // fraction of "fit zoom" considered "zoomed in"
+
 // When focusing an image via the command palette, zoom so the image occupies most of the viewport.
 // Keep a bit of padding so it doesn't feel edge-to-edge.
 const FOCUS_FIT_SCREEN_FRACTION = 0.88;
@@ -320,6 +328,19 @@ export function PixiWorkspace(props: {
       }
   >(null);
 
+  // Click/tap detection for "zoom in on click when zoomed out".
+  const tapCandidateRef = useRef<null | {
+    pointerId: number;
+    button: number;
+    startRx: number;
+    startRy: number;
+    moved: boolean;
+    objectId: string | null;
+    isHandle: boolean;
+    shift: boolean;
+  }>(null);
+  const lastFocusByClickAtMsRef = useRef<number>(-1);
+
   const viewAnimRef = useRef<null | {
     startMs: number;
     durationMs: number;
@@ -377,6 +398,8 @@ export function PixiWorkspace(props: {
   const [dropError, setDropError] = useState<string | null>(null);
   const [lightboxAssetId, setLightboxAssetId] = useState<string | null>(null);
   const initialViewOverrideRef = useRef<{ world_x: number; world_y: number; zoom: number } | null>(null);
+  const [booting, setBooting] = useState(true);
+  const [showBootUi, setShowBootUi] = useState(false);
   const [syncUi, setSyncUi] = useState(() => ({
     // IMPORTANT: keep the initial render deterministic so SSR and client hydration match.
     // We update this from `navigator.onLine` inside a useEffect after mount.
@@ -385,6 +408,39 @@ export function PixiWorkspace(props: {
     dirtyView: false,
     syncing: false,
   }));
+
+  const focusZoomInOnSprite = (sp: PIXI.Sprite) => {
+    const app = appRef.current;
+    const world = worldRef.current;
+    if (!app || !world) return false;
+
+    const currentZoom = world.scale.x || 1;
+    const fitZoom = fitZoomForSprite(sp, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ?? null;
+    // Match Spacebar behavior: always feel like a zoom-in.
+    const nextZoom = clamp(Math.max(currentZoom * 1.6, fitZoom ?? 0, currentZoom), MIN_ZOOM, MAX_ZOOM);
+    const p = sp.position;
+    const endX = app.renderer.width / 2 - p.x * nextZoom;
+    const endY = app.renderer.height / 2 - p.y * nextZoom;
+
+    cancelViewAnimation();
+    animateViewTo(
+      { x: endX, y: endY, zoom: nextZoom },
+      {
+        durationMs: 320,
+        onComplete: () => {
+          const w2 = worldRef.current;
+          if (!w2) return;
+          scheduleViewSave({
+            world_x: w2.position.x,
+            world_y: w2.position.y,
+            zoom: w2.scale.x,
+          });
+          schedulePreviewSave();
+        },
+      }
+    );
+    return true;
+  };
   const dirtyRef = useRef<{ canvas: boolean; view: boolean }>({ canvas: false, view: false });
   const flushInFlightRef = useRef<Promise<void> | null>(null);
   const localCanvasDraftTimer = useRef<number | null>(null);
@@ -460,9 +516,21 @@ export function PixiWorkspace(props: {
     setObjects(initialObjects);
     initialViewOverrideRef.current = null;
     dirtyRef.current = { canvas: false, view: false };
+    setBooting(true);
     setSyncUi((s) => ({ ...s, dirtyCanvas: false, dirtyView: false, syncing: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  // Avoid flashing a loader if boot is fast, but also avoid showing a "flaky" canvas while
+  // drafts are being restored / a quick sync is happening.
+  useEffect(() => {
+    if (!booting) {
+      setShowBootUi(false);
+      return;
+    }
+    const id = window.setTimeout(() => setShowBootUi(true), 150);
+    return () => window.clearTimeout(id);
+  }, [booting, projectId]);
 
   const setDirtyCanvas = (v: boolean) => {
     if (dirtyRef.current.canvas === v) return;
@@ -489,6 +557,7 @@ export function PixiWorkspace(props: {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      let shouldTryQuickSync = false;
       try {
         const draft = await getProjectDraft(projectId);
         if (cancelled) return;
@@ -508,6 +577,10 @@ export function PixiWorkspace(props: {
 
         setDirtyCanvas(!!draft.dirtyCanvas);
         setDirtyView(!!draft.dirtyView);
+        shouldTryQuickSync =
+          (draft.dirtyCanvas || draft.dirtyView) &&
+          typeof navigator !== "undefined" &&
+          navigator.onLine;
 
         const initialNewestMs = Math.max(
           0,
@@ -532,6 +605,21 @@ export function PixiWorkspace(props: {
         }
       } catch {
         // ignore
+      } finally {
+        // If we have unsynced local changes and we're online, it's usually fast to flush.
+        // Waiting briefly avoids showing a "Syncing…" flash on initial load.
+        if (!cancelled && shouldTryQuickSync) {
+          try {
+            const waitMs = 250;
+            await Promise.race([
+              flushDraftToServer(),
+              new Promise<void>((resolve) => window.setTimeout(resolve, waitMs)),
+            ]);
+          } catch {
+            // ignore
+          }
+        }
+        if (!cancelled) setBooting(false);
       }
     })();
     return () => {
@@ -541,7 +629,8 @@ export function PixiWorkspace(props: {
 
   const flushDraftToServer = async () => {
     if (flushInFlightRef.current) return flushInFlightRef.current;
-    if (!syncUi.online) return;
+    const isOnline = typeof navigator !== "undefined" ? navigator.onLine : syncUi.online;
+    if (!isOnline) return;
 
     const p = (async () => {
       setSyncUi((s) => ({ ...s, syncing: true }));
@@ -1530,6 +1619,16 @@ void main()
         setHoveredVideoObjectId(null);
         last = screenToRendererPoint(e.clientX, e.clientY);
         const hit = app.renderer.events.rootBoundary.hitTest(last.x, last.y) as any;
+        tapCandidateRef.current = {
+          pointerId: e.pointerId,
+          button: (e as PointerEvent).button ?? 0,
+          startRx: last.x,
+          startRy: last.y,
+          moved: false,
+          objectId: hit && !hit.__handle && hit.__objectId ? (hit.__objectId as string) : null,
+          isHandle: !!(hit && hit.__handle),
+          shift: (e as PointerEvent).shiftKey,
+        };
 
         // Resize handle hit?
         const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
@@ -1608,10 +1707,16 @@ void main()
 
       app.canvas.addEventListener("pointermove", (e) => {
         canvasHoverRef.current = true;
+        const cur = screenToRendererPoint(e.clientX, e.clientY);
+        const cand = tapCandidateRef.current;
+        if (cand && cand.pointerId === e.pointerId && !cand.moved) {
+          const dx = cur.x - cand.startRx;
+          const dy = cur.y - cand.startRy;
+          if (Math.hypot(dx, dy) > TAP_MAX_MOVE_PX) cand.moved = true;
+        }
         const gesture = activeGestureRef.current;
         if (!gesture) {
-          const p = screenToRendererPoint(e.clientX, e.clientY);
-          const hit = app.renderer.events.rootBoundary.hitTest(p.x, p.y) as any;
+          const hit = app.renderer.events.rootBoundary.hitTest(cur.x, cur.y) as any;
           if (hit && hit.__handle) {
             setHoveredVideoObjectId(null);
             return;
@@ -1624,7 +1729,6 @@ void main()
           }
           return;
         }
-        const cur = screenToRendererPoint(e.clientX, e.clientY);
 
         if (gesture.kind === "pan") {
           showMinimap();
@@ -1728,7 +1832,7 @@ void main()
         }
       });
 
-      app.canvas.addEventListener("pointerup", () => {
+      app.canvas.addEventListener("pointerup", (e) => {
         // Drop shadow back to normal when releasing a drag.
         const g = activeGestureRef.current;
         if (g && g.kind === "move") {
@@ -1736,6 +1840,29 @@ void main()
         }
         activeGestureRef.current = null;
         schedulePreviewSave();
+
+        const cand = tapCandidateRef.current;
+        tapCandidateRef.current = null;
+        if (!cand) return;
+        if (cand.moved) return;
+        if (cand.button !== 0) return;
+        if (cand.shift) return;
+        if (!cand.objectId) return;
+
+        const world = worldRef.current;
+        if (!world) return;
+        const currentZoom = world.scale.x || 1;
+        if (currentZoom > CLICK_TO_FOCUS_MAX_ZOOM) return;
+
+        const o = objectsRef.current.find((x) => x.id === cand.objectId);
+        if (!o || o.type !== "image" || !o.asset_id) return;
+        const sp = spritesByObjectIdRef.current.get(cand.objectId);
+        if (!sp) return;
+
+        // Only focus-zoom on "tap" (no drag). This preserves existing drag/selection behavior.
+        if (focusZoomInOnSprite(sp)) {
+          lastFocusByClickAtMsRef.current = performance.now();
+        }
       });
 
       app.canvas.addEventListener("wheel", (e) => {
@@ -1798,6 +1925,8 @@ void main()
       app.canvas.addEventListener("dblclick", (e) => {
         // Avoid opening while a gesture is active (e.g. drag/resize).
         if (activeGestureRef.current) return;
+        const now = performance.now();
+        if (now - lastFocusByClickAtMsRef.current < SUPPRESS_DBLCLICK_AFTER_FOCUS_MS) return;
 
         const p = screenToRendererPoint(e.clientX, e.clientY);
         const hit = app.renderer.events.rootBoundary.hitTest(p.x, p.y) as any;
@@ -1809,8 +1938,22 @@ void main()
         const o = objectsRef.current.find((x) => x.id === objectId);
         if (!o || o.type !== "image" || !o.asset_id) return;
 
-        // Compute the clicked sprite rect in *CSS pixels* so the lightbox can do a FLIP transition.
+        // Only open fullscreen when already reasonably zoomed in; otherwise treat dblclick as a focus-zoom.
+        const world = worldRef.current;
+        const currentZoom = world?.scale.x || 1;
         const sp = spritesByObjectIdRef.current.get(objectId);
+        const fitZoom = sp
+          ? fitZoomForSprite(sp, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ?? null
+          : null;
+        const openThreshold = fitZoom ? clamp(fitZoom * FULLSCREEN_DBLCLICK_FIT_FACTOR, 0.25, 0.75) : 0.35;
+        if (currentZoom < openThreshold) {
+          if (sp && focusZoomInOnSprite(sp)) {
+            lastFocusByClickAtMsRef.current = now;
+          }
+          return;
+        }
+
+        // Compute the clicked sprite rect in *CSS pixels* so the lightbox can do a FLIP transition.
         const rect = app.canvas.getBoundingClientRect();
         let origin: { left: number; top: number; width: number; height: number } | null = null;
         if (sp && rect.width > 0 && rect.height > 0 && app.renderer.width > 0 && app.renderer.height > 0) {
@@ -2089,10 +2232,6 @@ void main()
         const rw = Math.max(0, Math.abs(x1 - x0));
         const rh = Math.max(0, Math.abs(y1 - y0));
 
-        // Rounded viewport corners (soft border radius), sized to the viewport.
-        const r0 = clamp(Math.min(rw, rh) * 0.14, 3, 10);
-        const radius = Math.min(r0, rw / 2, rh / 2);
-
         // Shade everything outside the viewport (makes the visible area obvious).
         mm.shade.clear();
         mm.shade.beginFill(0x000000, minimapShadeAlphaRef.current);
@@ -2106,9 +2245,9 @@ void main()
         mm.shade.drawRect(rx + rw, ry, Math.max(0, innerX1 - (rx + rw)), rh);
         mm.shade.endFill();
 
-        // Theme-tinted visible area + theme border.
+        // Theme-tinted visible area + theme border (square corners).
         mm.viewport.beginFill(THEME_ACCENT, 0.07);
-        mm.viewport.roundRect(rx, ry, rw, rh, radius);
+        mm.viewport.drawRect(rx, ry, rw, rh);
         mm.viewport.endFill();
 
         // Thin border (1–2px) with a subtle glow. Draw inset so it doesn't get clipped by the mask.
@@ -2121,26 +2260,14 @@ void main()
         const glowH = Math.max(0, rh - glowStroke);
         if (glowW > 0 && glowH > 0) {
           mm.viewport.lineStyle(glowStroke, THEME_ACCENT, 0.22);
-          mm.viewport.roundRect(
-            rx + glowInset,
-            ry + glowInset,
-            glowW,
-            glowH,
-            Math.max(0, radius - glowInset)
-          );
+          mm.viewport.drawRect(rx + glowInset, ry + glowInset, glowW, glowH);
         }
 
         const mainW = Math.max(0, rw - stroke);
         const mainH = Math.max(0, rh - stroke);
         if (mainW > 0 && mainH > 0) {
           mm.viewport.lineStyle(stroke, THEME_ACCENT, 1);
-          mm.viewport.roundRect(
-            rx + inset,
-            ry + inset,
-            mainW,
-            mainH,
-            Math.max(0, radius - inset)
-          );
+          mm.viewport.drawRect(rx + inset, ry + inset, mainW, mainH);
         }
       };
 
@@ -2454,6 +2581,19 @@ void main()
           const v = extractHtmlVideoElementFromTexture(sp.texture);
           if (v) {
             videoElByObjectIdRef.current.set(o.id, v);
+            // IMPORTANT: Never allow videos to autoplay just because they were loaded.
+            // Only the selected video is allowed to play (handled in the ticker).
+            try {
+              const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+              if (selectedId !== o.id) {
+                v.pause();
+                // Best-effort reset to first frame (helps if the browser started playback briefly).
+                if (Number.isFinite(v.currentTime) && v.currentTime !== 0) v.currentTime = 0;
+                v.loop = false;
+              }
+            } catch {
+              // ignore
+            }
           } else {
             videoElByObjectIdRef.current.delete(o.id);
           }
@@ -2495,6 +2635,18 @@ void main()
             const v = extractHtmlVideoElementFromTexture(cur.texture);
             if (v) {
               videoElByObjectIdRef.current.set(o.id, v);
+              // IMPORTANT: Never allow videos to autoplay just because they were loaded.
+              // Only the selected video is allowed to play (handled in the ticker).
+              try {
+                const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+                if (selectedId !== o.id) {
+                  v.pause();
+                  if (Number.isFinite(v.currentTime) && v.currentTime !== 0) v.currentTime = 0;
+                  v.loop = false;
+                }
+              } catch {
+                // ignore
+              }
             } else {
               videoElByObjectIdRef.current.delete(o.id);
             }
@@ -2528,7 +2680,14 @@ void main()
     const rect = app.canvas.getBoundingClientRect();
     const rx = ((e.clientX - rect.left) * app.renderer.width) / rect.width;
     const ry = ((e.clientY - rect.top) * app.renderer.height) / rect.height;
-    const worldPoint = world.toLocal(new PIXI.Point(rx, ry));
+    // Place dropped items in screen-space so stacking looks consistent regardless of zoom level.
+    const STACK_STEP_PX = 28; // slight overlap while still revealing edges
+    const STACK_GROUP_SIZE = 12; // prevent huge diagonal drift when dropping many files
+    const STACK_GROUP_SHIFT_PX = 40; // shift each group so later items are still visible near the drop point
+    const stepRx = (STACK_STEP_PX * app.renderer.width) / rect.width;
+    const stepRy = (STACK_STEP_PX * app.renderer.height) / rect.height;
+    const groupShiftRx = (STACK_GROUP_SHIFT_PX * app.renderer.width) / rect.width;
+    const groupShiftRy = (STACK_GROUP_SHIFT_PX * app.renderer.height) / rect.height;
 
     const form = new FormData();
     for (const f of files) form.append("files", f, f.name);
@@ -2574,13 +2733,21 @@ void main()
       let z = prev.reduce((m, o) => Math.max(m, o.z_index), 0) + 1;
       for (let i = 0; i < uploaded.length; i++) {
         const a = uploaded[i]!;
+        const idxInGroup = i % STACK_GROUP_SIZE;
+        const group = Math.floor(i / STACK_GROUP_SIZE);
+        const p = world.toLocal(
+          new PIXI.Point(
+            rx + idxInGroup * stepRx + group * groupShiftRx,
+            ry + idxInGroup * stepRy + group * groupShiftRy,
+          ),
+        );
         next.push({
           id: newIds[i]!,
           project_id: props.projectId,
           type: "image",
           asset_id: a.id,
-          x: worldPoint.x,
-          y: worldPoint.y,
+          x: p.x,
+          y: p.y,
           scale_x: 1,
           scale_y: 1,
           rotation: 0,
@@ -2600,13 +2767,25 @@ void main()
 
   return (
     <div
-      ref={containerRef}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}
       className="relative h-full w-full"
     >
+      <div
+        ref={containerRef}
+        className={
+          "absolute inset-0 " + (booting ? "opacity-0 pointer-events-none" : "opacity-100")
+        }
+      />
+      {showBootUi ? (
+        <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center">
+          <div className="rounded-xl border border-white/10 bg-black/60 px-4 py-3 text-sm text-zinc-200 backdrop-blur">
+            {syncUi.syncing ? "Syncing…" : "Loading…"}
+          </div>
+        </div>
+      ) : null}
       {!syncUi.online || syncUi.syncing || syncUi.dirtyCanvas || syncUi.dirtyView ? (
-        <div className="pointer-events-none absolute left-4 top-4 z-50">
+        <div className="pointer-events-none absolute right-4 top-4 z-50">
           <div
             className={
               "rounded-full border px-3 py-1 text-[11px] font-medium " +
