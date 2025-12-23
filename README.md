@@ -7,7 +7,6 @@ High‑performance, Figma‑like canvas for building layouts by dropping images 
 - **Storage**: local filesystem under `data/`
 - **AI (optional)**: Moondream Station (local) or Hugging Face endpoint (worker)
 
-
 <img src="screen-4.jpg" alt="Workspace selection and transforms" width="860" />
 
    <img src="screen-1.jpg" alt="Asset lightbox with AI caption/tags and segments" width="860" />
