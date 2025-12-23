@@ -7,19 +7,13 @@ High‑performance, Figma‑like canvas for building layouts by dropping images 
 - **Storage**: local filesystem under `data/`
 - **AI (optional)**: Moondream Station (local) or Hugging Face endpoint (worker)
 
-![Moondream Invite Canvas — workspace](screen-1.jpg)
+
+<img src="screen-4.jpg" alt="Workspace selection and transforms" width="860" />
 
 ## Screenshots
 
-<table>
-  <tr>
-    <td><img src="screen-4.jpg" alt="Workspace selection and transforms" width="420" /></td>
-    <td><img src="screen-5.jpg" alt="Asset command palette search" width="420" /></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="screen-3.jpg" alt="Asset lightbox with AI caption/tags and segments" width="860" /></td>
-  </tr>
-</table>
+
+   <img src="screen-3.jpg" alt="Asset lightbox with AI caption/tags and segments" width="860" />
 
 ## What this is
 
