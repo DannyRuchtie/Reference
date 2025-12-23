@@ -10,12 +10,25 @@ import type { AssetWithAi, CanvasObjectRow } from "@/server/db/types";
 const THEME_ACCENT = 0x60a5fa; // blue-400
 const IMAGE_CORNER_RADIUS = 22; // in texture pixels at scale=1 (scales with zoom)
 
-const SHADOW_BASE_ALPHA = 0.16;
-const SHADOW_LIFT_ALPHA = 0.26;
-const SHADOW_BASE_OFFSET = 8;
-const SHADOW_LIFT_OFFSET = 14;
-const SHADOW_BASE_SPREAD = 10;
-const SHADOW_LIFT_SPREAD = 16;
+type WorkspaceBackgroundMode = "dark" | "light";
+
+const WORKSPACE_BG = {
+  dark: { hex: 0x0a0a0a, css: "#0a0a0a" }, // slightly-off black
+  light: { hex: 0xf8fafc, css: "#f8fafc" }, // slightly-off white (slate-50)
+} satisfies Record<WorkspaceBackgroundMode, { hex: number; css: string }>;
+
+const WORKSPACE_BG_ANIM_MS = 320;
+
+// Softer, subtler "card" shadow settings. These are in *texture pixels* at scale=1.
+// We animate between base↔lifted rather than snapping.
+const SHADOW_BASE_ALPHA = 0.10;
+const SHADOW_LIFT_ALPHA = 0.16;
+const SHADOW_BASE_OFFSET = 6;
+const SHADOW_LIFT_OFFSET = 10;
+const SHADOW_BASE_SPREAD = 18;
+const SHADOW_LIFT_SPREAD = 28;
+const SHADOW_LAYERS = 8;
+const SHADOW_ANIM_SMOOTHING = 0.12; // 0..1, higher = snappier
 
 function uuid() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
@@ -23,6 +36,32 @@ function uuid() {
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
+}
+
+function easeInOutCubic(t: number) {
+  const x = clamp(t, 0, 1);
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+}
+
+function hexToCss(hex: number) {
+  return `#${(hex >>> 0).toString(16).padStart(6, "0")}`;
+}
+
+function mixHexColor(a: number, b: number, t: number) {
+  const ar = (a >> 16) & 255;
+  const ag = (a >> 8) & 255;
+  const ab = a & 255;
+  const br = (b >> 16) & 255;
+  const bg = (b >> 8) & 255;
+  const bb = b & 255;
+  const rr = Math.round(lerp(ar, br, t));
+  const rg = Math.round(lerp(ag, bg, t));
+  const rb = Math.round(lerp(ab, bb, t));
+  return (rr << 16) | (rg << 8) | rb;
 }
 
 // Viewport zoom limits:
@@ -53,17 +92,20 @@ function ensureRoundedSpriteMask(sp: PIXI.Sprite) {
   g.fill(0xffffff);
 }
 
-function drawSoftShadow(g: PIXI.Graphics, w: number, h: number, r: number, lifted: boolean) {
+function drawSoftShadow(g: PIXI.Graphics, w: number, h: number, r: number, lift: number) {
   g.clear();
-  const alpha = lifted ? SHADOW_LIFT_ALPHA : SHADOW_BASE_ALPHA;
-  const offset = lifted ? SHADOW_LIFT_OFFSET : SHADOW_BASE_OFFSET;
-  const spread = lifted ? SHADOW_LIFT_SPREAD : SHADOW_BASE_SPREAD;
-  const layers = 3;
+  const tLift = clamp(lift, 0, 1);
+  const alpha = lerp(SHADOW_BASE_ALPHA, SHADOW_LIFT_ALPHA, tLift);
+  const offset = lerp(SHADOW_BASE_OFFSET, SHADOW_LIFT_OFFSET, tLift);
+  const spread = lerp(SHADOW_BASE_SPREAD, SHADOW_LIFT_SPREAD, tLift);
+  const layers = SHADOW_LAYERS;
 
   for (let i = 0; i < layers; i++) {
     const t = i / (layers - 1);
-    const pad = spread * (0.35 + t);
-    const a = alpha * (1 - t) * 0.85;
+    // Wider pads + a faster falloff makes the edge feel softer without getting too dark.
+    const pad = spread * (0.2 + 1.05 * t);
+    const falloff = (1 - t) * (1 - t);
+    const a = alpha * falloff * 0.45;
     const rr = Math.min(r + pad, (w + pad * 2) / 2, (h + pad * 2) / 2);
     g.roundRect(-w / 2 - pad + offset, -h / 2 - pad + offset, w + pad * 2, h + pad * 2, rr);
     g.fill({ color: 0x000000, alpha: a });
@@ -125,6 +167,8 @@ export function PixiWorkspace(props: {
   const texturePromiseRef = useRef<Map<string, Promise<PIXI.Texture>>>(new Map());
   const selectedIdsRef = useRef<string[]>([]);
   const highlightOverlayByObjectIdRef = useRef<Map<string, PIXI.Container>>(new Map());
+  const shadowLiftByObjectIdRef = useRef<Map<string, { current: number; target: number }>>(new Map());
+  const animatingShadowIdsRef = useRef<Set<string>>(new Set());
   const previewRef = useRef<{
     rt: PIXI.RenderTexture;
     root: PIXI.Container;
@@ -166,6 +210,67 @@ export function PixiWorkspace(props: {
   const [assets, setAssets] = useState<AssetWithAi[]>(props.initialAssets);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [dropError, setDropError] = useState<string | null>(null);
+
+  const workspaceBgModeRef = useRef<WorkspaceBackgroundMode>("dark");
+  const workspaceBgHexRef = useRef<number>(WORKSPACE_BG.dark.hex);
+  const workspaceBgRafRef = useRef<number | null>(null);
+
+  const applyWorkspaceBackgroundHex = (hex: number) => {
+    workspaceBgHexRef.current = hex;
+
+    const host = containerRef.current;
+    if (host) host.style.backgroundColor = hexToCss(hex);
+
+    const appAny = appRef.current as any;
+    const renderer = appAny?.renderer as any;
+    if (renderer) {
+      // Pixi v8: renderer.background.color
+      if (renderer.background && typeof renderer.background === "object") {
+        renderer.background.color = hex;
+      } else if ("backgroundColor" in renderer) {
+        renderer.backgroundColor = hex;
+      }
+    }
+    // Ensure the new clear color is visible immediately, even if Pixi isn't actively animating.
+    appAny?.render?.();
+  };
+
+  const animateWorkspaceBackgroundTo = (toHex: number) => {
+    const fromHex = workspaceBgHexRef.current;
+    if (fromHex === toHex) {
+      applyWorkspaceBackgroundHex(toHex);
+      return;
+    }
+
+    if (workspaceBgRafRef.current) cancelAnimationFrame(workspaceBgRafRef.current);
+    const start = performance.now();
+
+    const tick = (now: number) => {
+      const t = clamp((now - start) / WORKSPACE_BG_ANIM_MS, 0, 1);
+      const eased = easeInOutCubic(t);
+      const mixed = mixHexColor(fromHex, toHex, eased);
+      applyWorkspaceBackgroundHex(mixed);
+      if (t < 1) {
+        workspaceBgRafRef.current = requestAnimationFrame(tick);
+      } else {
+        workspaceBgRafRef.current = null;
+        applyWorkspaceBackgroundHex(toHex);
+      }
+    };
+
+    workspaceBgRafRef.current = requestAnimationFrame(tick);
+  };
+
+  const setWorkspaceBackgroundMode = (next: WorkspaceBackgroundMode, opts?: { animate?: boolean }) => {
+    workspaceBgModeRef.current = next;
+    const targetHex = WORKSPACE_BG[next].hex;
+    if (opts?.animate === false) applyWorkspaceBackgroundHex(targetHex);
+    else animateWorkspaceBackgroundTo(targetHex);
+  };
+
+  const toggleWorkspaceBackgroundMode = () => {
+    setWorkspaceBackgroundMode(workspaceBgModeRef.current === "dark" ? "light" : "dark");
+  };
 
   useEffect(() => {
     selectedIdsRef.current = selectedIds;
@@ -383,6 +488,16 @@ export function PixiWorkspace(props: {
     }
   };
 
+  const setShadowLiftTarget = (objectIds: string[], target: number) => {
+    const t = clamp(target, 0, 1);
+    for (const id of objectIds) {
+      const state = shadowLiftByObjectIdRef.current.get(id) ?? { current: 0, target: 0 };
+      state.target = t;
+      shadowLiftByObjectIdRef.current.set(id, state);
+      animatingShadowIdsRef.current.add(id);
+    }
+  };
+
   const applyHighlightToObject = (objectId: string, assetId: string) => {
     const sp = spritesByObjectIdRef.current.get(objectId);
     if (!sp) return;
@@ -470,15 +585,23 @@ export function PixiWorkspace(props: {
   // Keyboard delete/backspace to remove selected objects from canvas + DB (via canvas save).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Backspace" && e.key !== "Delete") return;
       // Don't intercept when typing.
       const el = document.activeElement as HTMLElement | null;
-      if (
+      const isTyping =
         el &&
         (el.tagName === "INPUT" ||
           el.tagName === "TEXTAREA" ||
-          (el as any).isContentEditable)
-      ) {
+          (el as any).isContentEditable);
+
+      // Toggle workspace background mode with "1".
+      if (!isTyping && (e.key === "1" || e.code === "Digit1" || e.code === "Numpad1")) {
+        e.preventDefault();
+        toggleWorkspaceBackgroundMode();
+        return;
+      }
+
+      if (e.key !== "Backspace" && e.key !== "Delete") return;
+      if (isTyping) {
         return;
       }
       const ids = selectedIdsRef.current;
@@ -538,6 +661,13 @@ export function PixiWorkspace(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Cleanup any in-flight background animation.
+  useEffect(() => {
+    return () => {
+      if (workspaceBgRafRef.current) cancelAnimationFrame(workspaceBgRafRef.current);
+    };
+  }, []);
+
   // Initialize Pixi
   useEffect(() => {
     const host = containerRef.current;
@@ -548,6 +678,9 @@ export function PixiWorkspace(props: {
     appRef.current = app;
 
     (async () => {
+      // Ensure the DOM behind the canvas matches our current workspace background.
+      host.style.backgroundColor = WORKSPACE_BG[workspaceBgModeRef.current].css;
+
       await app.init({
         resizeTo: host,
         background: "#0a0a0a",
@@ -556,6 +689,9 @@ export function PixiWorkspace(props: {
         resolution: window.devicePixelRatio || 1,
       });
       host.appendChild(app.canvas);
+
+      // Sync Pixi background to the current mode (without animating on boot).
+      setWorkspaceBackgroundMode(workspaceBgModeRef.current, { animate: false });
 
       const world = new PIXI.Container();
       world.sortableChildren = true;
@@ -766,6 +902,8 @@ export function PixiWorkspace(props: {
                 : [objectId]
               : [objectId];
           activeGestureRef.current = { kind: "move", objectIds: nextSel.length ? nextSel : moveIds, last };
+          // Lift the "card" shadow while dragging (animated smoothly in the ticker).
+          setShadowLiftTarget(nextSel.length ? nextSel : moveIds, 1);
           return;
         }
 
@@ -810,13 +948,6 @@ export function PixiWorkspace(props: {
             if (sh) {
               sh.position.x = sp.position.x;
               sh.position.y = sp.position.y;
-
-              const w = sp.texture?.orig?.width ?? 0;
-              const h = sp.texture?.orig?.height ?? 0;
-              if (w > 0 && h > 0) {
-                const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
-                drawSoftShadow(sh, w, h, r, true);
-              }
             }
           }
           activeGestureRef.current = { kind: "move", objectIds: gesture.objectIds, last: cur };
@@ -892,17 +1023,7 @@ export function PixiWorkspace(props: {
         // Drop shadow back to normal when releasing a drag.
         const g = activeGestureRef.current;
         if (g && g.kind === "move") {
-          for (const id of g.objectIds) {
-            const sp = spritesByObjectIdRef.current.get(id);
-            const sh = shadowsByObjectIdRef.current.get(id);
-            if (!sp || !sh) continue;
-            const w = sp.texture?.orig?.width ?? 0;
-            const h = sp.texture?.orig?.height ?? 0;
-            if (w > 0 && h > 0) {
-              const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
-              drawSoftShadow(sh, w, h, r, false);
-            }
-          }
+          setShadowLiftTarget(g.objectIds, 0);
         }
         activeGestureRef.current = null;
         schedulePreviewSave();
@@ -1257,6 +1378,33 @@ export function PixiWorkspace(props: {
       };
 
       app.ticker.add(() => {
+        // Subtle shadow lift animation (card feels "alive" but not distracting).
+        const animIds = animatingShadowIdsRef.current;
+        if (animIds.size) {
+          for (const id of [...animIds]) {
+            const st = shadowLiftByObjectIdRef.current.get(id);
+            if (!st) {
+              animIds.delete(id);
+              continue;
+            }
+            const diff = st.target - st.current;
+            st.current += diff * SHADOW_ANIM_SMOOTHING;
+            if (Math.abs(diff) < 0.001) {
+              st.current = st.target;
+              animIds.delete(id);
+            }
+
+            const sp = spritesByObjectIdRef.current.get(id);
+            const sh = shadowsByObjectIdRef.current.get(id);
+            if (!sp || !sh) continue;
+            const w = sp.texture?.orig?.width ?? 0;
+            const h = sp.texture?.orig?.height ?? 0;
+            if (w <= 0 || h <= 0) continue;
+            const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
+            drawSoftShadow(sh, w, h, r, st.current);
+          }
+        }
+
         updateSelectionOverlay();
         updateMultiSelection();
         updateMinimap();
@@ -1319,12 +1467,16 @@ export function PixiWorkspace(props: {
       if (!keep.has(id)) {
         display.destroy({ children: true });
         spritesByObjectIdRef.current.delete(id);
+        shadowLiftByObjectIdRef.current.delete(id);
+        animatingShadowIdsRef.current.delete(id);
       }
     }
     for (const [id, sh] of shadowsByObjectIdRef.current.entries()) {
       if (!keep.has(id)) {
         sh.destroy({ children: true });
         shadowsByObjectIdRef.current.delete(id);
+        shadowLiftByObjectIdRef.current.delete(id);
+        animatingShadowIdsRef.current.delete(id);
       }
     }
 
@@ -1343,6 +1495,9 @@ export function PixiWorkspace(props: {
           sh.scale.set(o.scale_x, o.scale_y);
           sh.rotation = o.rotation;
           sh.zIndex = o.z_index - 0.25;
+          if (!shadowLiftByObjectIdRef.current.has(o.id)) {
+            shadowLiftByObjectIdRef.current.set(o.id, { current: 0, target: 0 });
+          }
         }
         continue;
       }
@@ -1360,6 +1515,7 @@ export function PixiWorkspace(props: {
         sh.zIndex = o.z_index - 0.25;
         (sh as any).__objectId = o.id;
         shadowsByObjectIdRef.current.set(o.id, sh);
+        shadowLiftByObjectIdRef.current.set(o.id, { current: 0, target: 0 });
         world.addChild(sh);
 
         const sp = new PIXI.Sprite(PIXI.Texture.EMPTY);
@@ -1387,7 +1543,7 @@ export function PixiWorkspace(props: {
           const h = sp.texture?.orig?.height ?? 0;
           if (w > 0 && h > 0) {
             const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
-            drawSoftShadow(sh, w, h, r, false);
+            drawSoftShadow(sh, w, h, r, shadowLiftByObjectIdRef.current.get(o.id)?.current ?? 0);
           }
           continue;
         }
@@ -1422,7 +1578,8 @@ export function PixiWorkspace(props: {
             if (w > 0 && h > 0) {
               const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
               const shCur = shadowsByObjectIdRef.current.get(o.id);
-              if (shCur) drawSoftShadow(shCur, w, h, r, false);
+              const lift = shadowLiftByObjectIdRef.current.get(o.id)?.current ?? 0;
+              if (shCur) drawSoftShadow(shCur, w, h, r, lift);
             }
           }
         }).catch(() => {

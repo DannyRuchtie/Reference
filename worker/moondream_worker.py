@@ -175,6 +175,31 @@ def connect(db_path: str) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA busy_timeout = 5000")
+    # Best-effort schema ensure so the worker can run before the Next.js app has applied migrations.
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asset_embeddings (
+          asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+          model TEXT NOT NULL,
+          dim INTEGER NOT NULL,
+          embedding BLOB,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asset_segments (
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          tag TEXT NOT NULL,
+          svg TEXT,
+          bbox_json TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (asset_id, tag)
+        )
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS asset_segments_tag_idx ON asset_segments(tag)")
     return con
 
 
@@ -184,7 +209,7 @@ def fetch_next_job(con: sqlite3.Connection) -> Optional[Job]:
         SELECT a.id AS asset_id, a.project_id, a.original_name, a.mime_type, a.storage_path
         FROM assets a
         JOIN asset_ai ai ON ai.asset_id = a.id
-        WHERE ai.status = 'pending' AND a.mime_type LIKE 'image/%'
+        WHERE ai.status IN ('pending', 'processing') AND a.mime_type LIKE 'image/%'
         ORDER BY ai.updated_at ASC
         LIMIT 1
         """
