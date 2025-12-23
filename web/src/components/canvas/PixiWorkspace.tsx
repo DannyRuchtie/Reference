@@ -75,6 +75,39 @@ function redrawMinimapBackground(
 const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 1.0;
 
+// When focusing an image via the command palette, zoom so the image occupies most of the viewport.
+// Keep a bit of padding so it doesn't feel edge-to-edge.
+const FOCUS_FIT_SCREEN_FRACTION = 0.88;
+
+function fitZoomForSprite(
+  sp: PIXI.Sprite,
+  viewportW: number,
+  viewportH: number,
+  fraction: number
+): number | null {
+  const texW = sp.texture?.orig?.width ?? 0;
+  const texH = sp.texture?.orig?.height ?? 0;
+  if (texW <= 0 || texH <= 0) return null;
+  if (viewportW <= 0 || viewportH <= 0) return null;
+
+  // Sprite scale is already the object scale (independent of world zoom).
+  const w = Math.abs(texW * (sp.scale?.x ?? 1));
+  const h = Math.abs(texH * (sp.scale?.y ?? 1));
+  if (w <= 0 || h <= 0) return null;
+
+  // Include rotation by computing the axis-aligned bounding box of the rotated rect.
+  const r = sp.rotation ?? 0;
+  const c = Math.abs(Math.cos(r));
+  const s = Math.abs(Math.sin(r));
+  const effW = c * w + s * h;
+  const effH = s * w + c * h;
+  if (effW <= 0 || effH <= 0) return null;
+
+  const frac = clamp(fraction, 0.1, 0.98);
+  const fit = Math.min((viewportW * frac) / effW, (viewportH * frac) / effH);
+  return clamp(fit, MIN_ZOOM, MAX_ZOOM);
+}
+
 function ensureRoundedSpriteMask(sp: PIXI.Sprite) {
   const w = sp.texture?.orig?.width ?? 0;
   const h = sp.texture?.orig?.height ?? 0;
@@ -1446,14 +1479,20 @@ export function PixiWorkspace(props: {
       const d = spritesByObjectIdRef.current.get(objectId) as PIXI.Sprite | undefined;
       if (!d) return;
       const p = d.position;
-      // Center the object in view.
-      world.position.x = app.renderer.width / 2 - p.x * world.scale.x;
-      world.position.y = app.renderer.height / 2 - p.y * world.scale.y;
+      // Zoom to fit (when possible), then center the object in view.
+      const nextZoom =
+        fitZoomForSprite(d, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ??
+        world.scale.x;
+      if (world.scale.x !== nextZoom || world.scale.y !== nextZoom) {
+        world.scale.set(nextZoom);
+      }
+      world.position.x = app.renderer.width / 2 - p.x * nextZoom;
+      world.position.y = app.renderer.height / 2 - p.y * nextZoom;
       setSelectedIds([objectId]);
       scheduleViewSave({
         world_x: world.position.x,
         world_y: world.position.y,
-        zoom: world.scale.x,
+        zoom: nextZoom,
       });
     });
 

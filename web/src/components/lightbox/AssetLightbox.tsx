@@ -211,15 +211,7 @@ export function AssetLightbox(props: {
           <div className="max-h-[45vh] overflow-auto p-4 md:max-h-none md:h-[calc(100%-57px)]">
             <div className="space-y-5">
               <section>
-                <div className="text-xs font-medium text-zinc-300">Moondream</div>
                 <div className="mt-2 space-y-2 text-sm text-zinc-100">
-                  <div className="text-zinc-200">
-                    <span className="text-zinc-400">Status:</span>{" "}
-                    {asset.ai_status ?? "—"}
-                    {asset.ai_model_version ? (
-                      <span className="text-zinc-500"> · {asset.ai_model_version}</span>
-                    ) : null}
-                  </div>
                   {asset.ai_caption ? (
                     <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-sm text-zinc-100">
                       {asset.ai_caption}
@@ -266,12 +258,6 @@ export function AssetLightbox(props: {
               <section>
                 <div className="text-xs font-medium text-zinc-300">File</div>
                 <div className="mt-2 space-y-2 text-xs text-zinc-300">
-                  <div className="break-all">
-                    <span className="text-zinc-500">Asset ID:</span> {asset.id}
-                  </div>
-                  <div className="break-all">
-                    <span className="text-zinc-500">SHA256:</span> {asset.sha256}
-                  </div>
                   <div className="break-all">
                     <span className="text-zinc-500">Created:</span> {asset.created_at}
                   </div>
