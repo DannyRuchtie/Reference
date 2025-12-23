@@ -46,6 +46,11 @@ export function deleteAssetSearchRow(assetId: string) {
   db.prepare("DELETE FROM asset_search WHERE asset_id = ?").run(assetId);
 }
 
+export function deleteAssetSearchRowsByProject(projectId: string) {
+  const db = getDb();
+  db.prepare("DELETE FROM asset_search WHERE project_id = ?").run(projectId);
+}
+
 export function searchAssets(args: {
   projectId: string;
   query: string;

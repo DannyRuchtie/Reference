@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import { getDb } from "./db";
 import type { ProjectRow } from "./types";
+import { deleteAssetSearchRowsByProject } from "./search";
 
 export function createProject(name: string): ProjectRow {
   const db = getDb();
@@ -43,8 +44,13 @@ export function renameProject(id: string, name: string): ProjectRow | null {
 
 export function deleteProject(id: string): boolean {
   const db = getDb();
-  const result = db.prepare("DELETE FROM projects WHERE id = ?").run(id);
-  return result.changes > 0;
+  // Best-effort: also clean FTS rows (virtual table has no FK constraints).
+  const tx = db.transaction(() => {
+    deleteAssetSearchRowsByProject(id);
+    const result = db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    return result.changes > 0;
+  });
+  return tx();
 }
 
 

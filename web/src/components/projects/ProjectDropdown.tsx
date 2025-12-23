@@ -196,10 +196,22 @@ export function ProjectDropdown(props: {
                           setActionsFor(null);
                           router.push(`/projects/${p.id}`);
                         }}
-                        className="min-w-0 flex-1 text-left"
+                        className="min-w-0 flex-1 text-left flex items-center gap-3"
                       >
-                        <div className="truncate text-zinc-200">{p.name}</div>
-                        <div className="truncate text-xs text-zinc-500">{p.id}</div>
+                        <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-white/10 bg-zinc-900">
+                          <img
+                            src={`/files/projects/${p.id}/preview`}
+                            alt=""
+                            className="h-full w-full object-cover"
+                            onError={(e) => {
+                              // Hide broken image icon; keep placeholder background.
+                              (e.currentTarget as HTMLImageElement).style.display = "none";
+                            }}
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-zinc-200">{p.name}</div>
+                        </div>
                       </button>
 
                       <button

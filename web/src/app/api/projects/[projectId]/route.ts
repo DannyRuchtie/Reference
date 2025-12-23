@@ -1,6 +1,8 @@
 import { z } from "zod";
+import fs from "node:fs";
 
 import { deleteProject, getProject, renameProject } from "@/server/db/projects";
+import { projectDir } from "@/server/storage/paths";
 
 export const runtime = "nodejs";
 
@@ -41,6 +43,15 @@ export async function DELETE(
   const { projectId } = await ctx.params;
   const ok = deleteProject(projectId);
   if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
+
+  // Best-effort disk cleanup: remove the project folder (assets + thumbs).
+  // DB deletion is the source of truth; failures here should not block the response.
+  try {
+    fs.rmSync(projectDir(projectId), { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+
   return Response.json({ ok: true });
 }
 

@@ -8,6 +8,14 @@ import type { AssetWithAi, CanvasObjectRow } from "@/server/db/types";
 // Theme color used for the *viewport region* indicator inside the minimap.
 // Keep this aligned with the app's visual language (matches the existing selection blue).
 const THEME_ACCENT = 0x60a5fa; // blue-400
+const IMAGE_CORNER_RADIUS = 22; // in texture pixels at scale=1 (scales with zoom)
+
+const SHADOW_BASE_ALPHA = 0.16;
+const SHADOW_LIFT_ALPHA = 0.26;
+const SHADOW_BASE_OFFSET = 8;
+const SHADOW_LIFT_OFFSET = 14;
+const SHADOW_BASE_SPREAD = 10;
+const SHADOW_LIFT_SPREAD = 16;
 
 function uuid() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
@@ -15,6 +23,45 @@ function uuid() {
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
+}
+
+function ensureRoundedSpriteMask(sp: PIXI.Sprite) {
+  const w = sp.texture?.orig?.width ?? 0;
+  const h = sp.texture?.orig?.height ?? 0;
+  if (w <= 0 || h <= 0) return;
+
+  const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
+  let g = (sp as any).__roundMask as PIXI.Graphics | undefined;
+  if (!g) {
+    g = new PIXI.Graphics();
+    g.eventMode = "none";
+    // Keep visible=true; in Pixi v8 masks can stop working when visible=false.
+    g.visible = true;
+    (sp as any).__roundMask = g;
+    sp.addChild(g);
+    sp.mask = g;
+  }
+
+  g.clear();
+  g.roundRect(-w / 2, -h / 2, w, h, r);
+  g.fill(0xffffff);
+}
+
+function drawSoftShadow(g: PIXI.Graphics, w: number, h: number, r: number, lifted: boolean) {
+  g.clear();
+  const alpha = lifted ? SHADOW_LIFT_ALPHA : SHADOW_BASE_ALPHA;
+  const offset = lifted ? SHADOW_LIFT_OFFSET : SHADOW_BASE_OFFSET;
+  const spread = lifted ? SHADOW_LIFT_SPREAD : SHADOW_BASE_SPREAD;
+  const layers = 3;
+
+  for (let i = 0; i < layers; i++) {
+    const t = i / (layers - 1);
+    const pad = spread * (0.35 + t);
+    const a = alpha * (1 - t) * 0.85;
+    const rr = Math.min(r + pad, (w + pad * 2) / 2, (h + pad * 2) / 2);
+    g.roundRect(-w / 2 - pad + offset, -h / 2 - pad + offset, w + pad * 2, h + pad * 2, rr);
+    g.fill({ color: 0x000000, alpha: a });
+  }
 }
 
 function smoothstep01(t: number) {
@@ -61,9 +108,16 @@ export function PixiWorkspace(props: {
   const appRef = useRef<PIXI.Application | null>(null);
   const worldRef = useRef<PIXI.Container | null>(null);
   const spritesByObjectIdRef = useRef<Map<string, PIXI.Sprite>>(new Map());
+  const shadowsByObjectIdRef = useRef<Map<string, PIXI.Graphics>>(new Map());
   const textureCacheRef = useRef<Map<string, PIXI.Texture>>(new Map());
   const texturePromiseRef = useRef<Map<string, Promise<PIXI.Texture>>>(new Map());
   const selectedIdsRef = useRef<string[]>([]);
+  const previewRef = useRef<{
+    rt: PIXI.RenderTexture;
+    root: PIXI.Container;
+    content: PIXI.Container;
+    spriteById: Map<string, PIXI.Sprite>;
+  } | null>(null);
   const selectionLayerRef = useRef<PIXI.Container | null>(null);
   const selectionBoxRef = useRef<PIXI.Graphics | null>(null);
   const handleRefs = useRef<Record<string, PIXI.Graphics>>({});
@@ -113,6 +167,7 @@ export function PixiWorkspace(props: {
   // Debounced canvas persistence
   const saveTimer = useRef<number | null>(null);
   const viewSaveTimer = useRef<number | null>(null);
+  const previewSaveTimer = useRef<number | null>(null);
   const emitTimerRef = useRef<number | null>(null);
   const emitLatestRef = useRef<CanvasObjectRow[] | null>(null);
 
@@ -139,6 +194,7 @@ export function PixiWorkspace(props: {
         body: JSON.stringify({ objects: nextObjects }),
       }).catch(() => {});
     }, 250);
+    schedulePreviewSave();
   };
 
   const saveNow = async (nextObjects: CanvasObjectRow[]) => {
@@ -162,6 +218,117 @@ export function PixiWorkspace(props: {
         body: JSON.stringify(view),
       }).catch(() => {});
     }, 250);
+  };
+
+  const schedulePreviewSave = () => {
+    if (previewSaveTimer.current) window.clearTimeout(previewSaveTimer.current);
+    previewSaveTimer.current = window.setTimeout(async () => {
+      const app = appRef.current;
+      const preview = previewRef.current;
+      if (!app) return;
+      if (!preview) return;
+
+      // Build a preview of the *entire board* (like the minimap), not just the current viewport.
+      const outSize = 256;
+      const content = preview.content;
+      const spriteById = preview.spriteById;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+
+      for (const sp of spritesByObjectIdRef.current.values()) {
+        const w = sp.texture?.orig?.width ?? 0;
+        const h = sp.texture?.orig?.height ?? 0;
+        if (w <= 0 || h <= 0) continue;
+        const hw = (w / 2) * sp.scale.x;
+        const hh = (h / 2) * sp.scale.y;
+        minX = Math.min(minX, sp.position.x - hw);
+        maxX = Math.max(maxX, sp.position.x + hw);
+        minY = Math.min(minY, sp.position.y - hh);
+        maxY = Math.max(maxY, sp.position.y + hh);
+      }
+
+      // If nothing is on the board yet, skip preview upload.
+      if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+        return;
+      }
+
+      const w0 = Math.max(1, maxX - minX);
+      const h0 = Math.max(1, maxY - minY);
+      const size0 = Math.max(w0, h0);
+      const pad = Math.max(24, size0 * 0.08);
+      const size = size0 + pad * 2;
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+
+      // Sync preview sprites
+      const seen = new Set<string>();
+      for (const sp of spritesByObjectIdRef.current.values()) {
+        const id = (sp as any).__objectId as string | undefined;
+        if (!id) continue;
+        const tex = sp.texture;
+        const tw = tex?.orig?.width ?? 0;
+        const th = tex?.orig?.height ?? 0;
+        if (tw <= 0 || th <= 0) continue;
+        seen.add(id);
+
+        let psp = spriteById.get(id);
+        if (!psp) {
+          psp = new PIXI.Sprite(tex);
+          psp.anchor.set(0.5);
+          psp.eventMode = "none";
+          content.addChild(psp);
+          spriteById.set(id, psp);
+        } else if (psp.texture !== tex) {
+          psp.texture = tex;
+        }
+
+        psp.position.copyFrom(sp.position);
+        psp.scale.copyFrom(sp.scale);
+        psp.rotation = sp.rotation;
+        psp.alpha = 1;
+      }
+
+      for (const [id, psp] of spriteById.entries()) {
+        if (seen.has(id)) continue;
+        psp.destroy({ children: true, texture: false });
+        spriteById.delete(id);
+      }
+
+      // Fit board bounds into a square texture
+      const s = outSize / size;
+      content.scale.set(s);
+      content.position.set(outSize / 2 - cx * s, outSize / 2 - cy * s);
+
+      // Render to offscreen texture and extract. This avoids the "black canvas" WebGL readback issue.
+      app.renderer.render({
+        container: preview.root,
+        target: preview.rt,
+        clear: true,
+        clearColor: 0x0a0a0a,
+      });
+
+      const cAny = app.renderer.extract.canvas({ target: preview.rt }) as any;
+      let finalBlob: Blob | null = null;
+      if (cAny?.convertToBlob) {
+        finalBlob = await cAny.convertToBlob({ type: "image/webp", quality: 0.75 }).catch(() => null);
+        if (!finalBlob) finalBlob = await cAny.convertToBlob({ type: "image/png" }).catch(() => null);
+      } else if (cAny?.toBlob) {
+        finalBlob =
+          (await new Promise<Blob | null>((resolve) => cAny.toBlob(resolve, "image/webp", 0.75))) ??
+          (await new Promise<Blob | null>((resolve) => cAny.toBlob(resolve, "image/png")));
+      }
+      if (!finalBlob) return;
+
+      const buf = await finalBlob.arrayBuffer();
+      await fetch(`/api/projects/${props.projectId}/preview`, {
+        method: "PUT",
+        headers: { "Content-Type": finalBlob.type || "image/webp" },
+        body: buf,
+      }).catch(() => {});
+    }, 1200);
   };
 
   const assetById = useMemo(() => {
@@ -228,6 +395,7 @@ export function PixiWorkspace(props: {
       window.setTimeout(async () => {
         if (!nextObjects) return;
         await saveNow(nextObjects);
+        schedulePreviewSave();
 
         if (assetsToDelete.length) {
           for (const assetId of assetsToDelete) {
@@ -266,6 +434,13 @@ export function PixiWorkspace(props: {
       world.sortableChildren = true;
       worldRef.current = world;
       app.stage.addChild(world);
+
+      // Offscreen preview renderer state (used for project thumbnails)
+      const previewRoot = new PIXI.Container();
+      const previewContent = new PIXI.Container();
+      previewRoot.addChild(previewContent);
+      const rt = PIXI.RenderTexture.create({ width: 256, height: 256, resolution: 1 });
+      previewRef.current = { rt, root: previewRoot, content: previewContent, spriteById: new Map() };
 
       // Restore last viewport for this project (pan + zoom)
       if (props.initialView) {
@@ -344,6 +519,9 @@ export function PixiWorkspace(props: {
       selectionLayer.addChild(selectionBox);
 
       const multiSel = new PIXI.Graphics();
+      multiSel.eventMode = "none";
+      // Ensure multi-select outlines render above sprites (but below single-select handles).
+      multiSel.zIndex = 999_999_999;
       multiSelectionRef.current = multiSel;
       world.addChild(multiSel);
 
@@ -496,9 +674,22 @@ export function PixiWorkspace(props: {
           const dx = cur.x - gesture.last.x;
           const dy = cur.y - gesture.last.y;
           const inv = 1 / (world.scale.x || 1);
-          for (const [, sp] of sprites) {
+          for (const [id, sp] of sprites) {
             sp.position.x += dx * inv;
             sp.position.y += dy * inv;
+
+            const sh = shadowsByObjectIdRef.current.get(id);
+            if (sh) {
+              sh.position.x = sp.position.x;
+              sh.position.y = sp.position.y;
+
+              const w = sp.texture?.orig?.width ?? 0;
+              const h = sp.texture?.orig?.height ?? 0;
+              if (w > 0 && h > 0) {
+                const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
+                drawSoftShadow(sh, w, h, r, true);
+              }
+            }
           }
           activeGestureRef.current = { kind: "move", objectIds: gesture.objectIds, last: cur };
 
@@ -570,7 +761,23 @@ export function PixiWorkspace(props: {
       });
 
       app.canvas.addEventListener("pointerup", () => {
+        // Drop shadow back to normal when releasing a drag.
+        const g = activeGestureRef.current;
+        if (g && g.kind === "move") {
+          for (const id of g.objectIds) {
+            const sp = spritesByObjectIdRef.current.get(id);
+            const sh = shadowsByObjectIdRef.current.get(id);
+            if (!sp || !sh) continue;
+            const w = sp.texture?.orig?.width ?? 0;
+            const h = sp.texture?.orig?.height ?? 0;
+            if (w > 0 && h > 0) {
+              const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
+              drawSoftShadow(sh, w, h, r, false);
+            }
+          }
+        }
         activeGestureRef.current = null;
+        schedulePreviewSave();
       });
 
       app.canvas.addEventListener("wheel", (e) => {
@@ -579,10 +786,18 @@ export function PixiWorkspace(props: {
         const mouse = screenToRendererPoint(e.clientX, e.clientY);
         const before = screenToWorld(mouse);
         const direction = e.deltaY > 0 ? -1 : 1;
-        const factor = direction > 0 ? 1.1 : 0.9;
+
+        // Faster zoom, but still smooth:
+        // - scale factor based on scroll intensity (trackpad vs wheel)
+        // - easing near min/max is handled below via smoothstep01(t)
+        const deltaY =
+          e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 800 : e.deltaY;
+        const step = clamp(Math.abs(deltaY) / 100, 0.35, 6);
+        const zoomBase = 1.16; // increase for faster zoom out/in
+        const factor = Math.pow(zoomBase, direction * step);
         // Ease into zoom limits (rubber-band resistance near the ends).
         // Max zoom-in is 100% (1.0). Allow zooming out to 5% (0.05).
-        const minZoom = 0.05;
+        const minZoom = 0.25;
         const maxZoom = 1.0;
         const current = world.scale.x;
         const desired = current * factor;
@@ -603,6 +818,7 @@ export function PixiWorkspace(props: {
           world_y: world.position.y,
           zoom: world.scale.x,
         });
+        schedulePreviewSave();
       }, { passive: false });
 
       // Disable context menu on canvas
@@ -661,17 +877,45 @@ export function PixiWorkspace(props: {
         }
         const worldScale = world.scale.x || 1;
         const strokeW = 2 / Math.max(0.0001, worldScale);
+        const glowW = 6 / Math.max(0.0001, worldScale);
+        const pad = 2 / Math.max(0.0001, worldScale);
         g.clear();
-        g.lineStyle(strokeW, 0x60a5fa, 0.9);
         for (const id of selected) {
           const sp = spritesByObjectIdRef.current.get(id);
           if (!sp) continue;
           const w = sp.texture?.orig?.width ?? 0;
           const h = sp.texture?.orig?.height ?? 0;
           if (w <= 0 || h <= 0) continue;
-          const bw = w * sp.scale.x;
-          const bh = h * sp.scale.y;
-          g.drawRect(sp.position.x - bw / 2, sp.position.y - bh / 2, bw, bh);
+          const hw = (w * sp.scale.x) / 2 + pad;
+          const hh = (h * sp.scale.y) / 2 + pad;
+
+          const cos = Math.cos(sp.rotation);
+          const sin = Math.sin(sp.rotation);
+          const rot = (x: number, y: number) => ({
+            x: sp.position.x + x * cos - y * sin,
+            y: sp.position.y + x * sin + y * cos,
+          });
+
+          const p1 = rot(-hw, -hh);
+          const p2 = rot(hw, -hh);
+          const p3 = rot(hw, hh);
+          const p4 = rot(-hw, hh);
+
+          // Glow stroke
+          g.lineStyle(glowW, THEME_ACCENT, 0.22);
+          g.moveTo(p1.x, p1.y);
+          g.lineTo(p2.x, p2.y);
+          g.lineTo(p3.x, p3.y);
+          g.lineTo(p4.x, p4.y);
+          g.lineTo(p1.x, p1.y);
+
+          // Main stroke
+          g.lineStyle(strokeW, THEME_ACCENT, 0.98);
+          g.moveTo(p1.x, p1.y);
+          g.lineTo(p2.x, p2.y);
+          g.lineTo(p3.x, p3.y);
+          g.lineTo(p4.x, p4.y);
+          g.lineTo(p1.x, p1.y);
         }
       };
 
@@ -892,6 +1136,8 @@ export function PixiWorkspace(props: {
 
       // Initial render
       rebuildWorldSprites(world);
+      // Seed a preview shortly after first paint.
+      schedulePreviewSave();
     })();
 
     return () => {
@@ -947,6 +1193,12 @@ export function PixiWorkspace(props: {
         spritesByObjectIdRef.current.delete(id);
       }
     }
+    for (const [id, sh] of shadowsByObjectIdRef.current.entries()) {
+      if (!keep.has(id)) {
+        sh.destroy({ children: true });
+        shadowsByObjectIdRef.current.delete(id);
+      }
+    }
 
     for (const o of objects) {
       if (spritesByObjectIdRef.current.has(o.id)) {
@@ -955,12 +1207,33 @@ export function PixiWorkspace(props: {
         d.scale.set(o.scale_x, o.scale_y);
         d.rotation = o.rotation;
         d.zIndex = o.z_index;
+        ensureRoundedSpriteMask(d);
+
+        const sh = shadowsByObjectIdRef.current.get(o.id);
+        if (sh) {
+          sh.position.set(o.x, o.y);
+          sh.scale.set(o.scale_x, o.scale_y);
+          sh.rotation = o.rotation;
+          sh.zIndex = o.z_index - 0.25;
+        }
         continue;
       }
 
       if (o.type === "image" && o.asset_id) {
         const a = assetById.get(o.asset_id);
         if (!a) continue;
+
+        // Shadow (sibling behind the sprite so the sprite's rounded mask doesn't clip it).
+        const sh = new PIXI.Graphics();
+        sh.eventMode = "none";
+        sh.position.set(o.x, o.y);
+        sh.scale.set(o.scale_x, o.scale_y);
+        sh.rotation = o.rotation;
+        sh.zIndex = o.z_index - 0.25;
+        (sh as any).__objectId = o.id;
+        shadowsByObjectIdRef.current.set(o.id, sh);
+        world.addChild(sh);
+
         const sp = new PIXI.Sprite(PIXI.Texture.EMPTY);
         sp.eventMode = "static";
         sp.cursor = "move";
@@ -981,6 +1254,13 @@ export function PixiWorkspace(props: {
         const cached = textureCacheRef.current.get(absUrl);
         if (cached) {
           sp.texture = cached;
+          ensureRoundedSpriteMask(sp);
+          const w = sp.texture?.orig?.width ?? 0;
+          const h = sp.texture?.orig?.height ?? 0;
+          if (w > 0 && h > 0) {
+            const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
+            drawSoftShadow(sh, w, h, r, false);
+          }
           continue;
         }
 
@@ -1006,7 +1286,17 @@ export function PixiWorkspace(props: {
         p.then((tex) => {
           // Object might have been deleted; ensure sprite still exists.
           const cur = spritesByObjectIdRef.current.get(o.id);
-          if (cur) cur.texture = tex;
+          if (cur) {
+            cur.texture = tex;
+            ensureRoundedSpriteMask(cur);
+            const w = cur.texture?.orig?.width ?? 0;
+            const h = cur.texture?.orig?.height ?? 0;
+            if (w > 0 && h > 0) {
+              const r = Math.min(IMAGE_CORNER_RADIUS, w / 2, h / 2);
+              const shCur = shadowsByObjectIdRef.current.get(o.id);
+              if (shCur) drawSoftShadow(shCur, w, h, r, false);
+            }
+          }
         }).catch(() => {
           // leave placeholder; error already logged
         });
