@@ -829,6 +829,10 @@ export function PixiWorkspace(props: {
         const rw = Math.max(0, Math.abs(x1 - x0));
         const rh = Math.max(0, Math.abs(y1 - y0));
 
+        // Rounded viewport corners (soft border radius), sized to the viewport.
+        const r0 = clamp(Math.min(rw, rh) * 0.14, 3, 10);
+        const radius = Math.min(r0, rw / 2, rh / 2);
+
         // Shade everything outside the viewport (makes the visible area obvious).
         mm.shade.clear();
         mm.shade.beginFill(0x000000, 0.28);
@@ -842,28 +846,42 @@ export function PixiWorkspace(props: {
         mm.shade.drawRect(rx + rw, ry, Math.max(0, innerX1 - (rx + rw)), rh);
         mm.shade.endFill();
 
-        // High-contrast viewport border (draw inset so it's not clipped by the mask).
-        const stroke = 3;
-        const inset = stroke / 2;
         // Theme-tinted visible area + theme border.
         mm.viewport.beginFill(THEME_ACCENT, 0.07);
-        mm.viewport.drawRect(rx, ry, rw, rh);
+        mm.viewport.roundRect(rx, ry, rw, rh, radius);
         mm.viewport.endFill();
-        // Add a subtle "glow" so the outline stays visible over thumbnails.
-        mm.viewport.lineStyle(stroke + 4, THEME_ACCENT, 0.22);
-        mm.viewport.drawRect(
-          rx + (inset + 2),
-          ry + (inset + 2),
-          Math.max(0, rw - (stroke + 4)),
-          Math.max(0, rh - (stroke + 4))
-        );
-        mm.viewport.lineStyle(stroke, THEME_ACCENT, 1);
-        mm.viewport.drawRect(
-          rx + inset,
-          ry + inset,
-          Math.max(0, rw - stroke),
-          Math.max(0, rh - stroke)
-        );
+
+        // Thin border (1–2px) with a subtle glow. Draw inset so it doesn't get clipped by the mask.
+        const stroke = 2;
+        const glowStroke = stroke + 4;
+        const glowInset = glowStroke / 2;
+        const inset = stroke / 2;
+
+        const glowW = Math.max(0, rw - glowStroke);
+        const glowH = Math.max(0, rh - glowStroke);
+        if (glowW > 0 && glowH > 0) {
+          mm.viewport.lineStyle(glowStroke, THEME_ACCENT, 0.22);
+          mm.viewport.roundRect(
+            rx + glowInset,
+            ry + glowInset,
+            glowW,
+            glowH,
+            Math.max(0, radius - glowInset)
+          );
+        }
+
+        const mainW = Math.max(0, rw - stroke);
+        const mainH = Math.max(0, rh - stroke);
+        if (mainW > 0 && mainH > 0) {
+          mm.viewport.lineStyle(stroke, THEME_ACCENT, 1);
+          mm.viewport.roundRect(
+            rx + inset,
+            ry + inset,
+            mainW,
+            mainH,
+            Math.max(0, radius - inset)
+          );
+        }
       };
 
       app.ticker.add(() => {
