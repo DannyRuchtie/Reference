@@ -136,7 +136,6 @@ export function AssetCommandPalette(props: {
                       <div className="truncate text-xs text-zinc-500">{subtitle}</div>
                     ) : null}
                   </div>
-                  <div className="text-xs text-zinc-500">{onCanvas ? "focus" : "place"}</div>
                 </Command.Item>
               );
             })}

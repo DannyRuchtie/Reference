@@ -11,6 +11,8 @@ type Segment = {
   updatedAt: string;
 };
 
+type OriginRect = { left: number; top: number; width: number; height: number };
+
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -33,11 +35,16 @@ function safeParseTagsJson(tagsJson: string | null): string[] {
 export function AssetLightbox(props: {
   projectId: string;
   asset: AssetWithAi;
+  originRect?: OriginRect | null;
   onClose: () => void;
 }) {
   const { asset, projectId, onClose } = props;
   const [entered, setEntered] = useState(false);
+  const [animating, setAnimating] = useState<boolean>(!!props.originRect);
   const [segments, setSegments] = useState<Segment[] | null>(null);
+  const [targetRect, setTargetRect] = useState<OriginRect | null>(null);
+  const [ghostStyle, setGhostStyle] = useState<React.CSSProperties | null>(null);
+  const [ghostTransform, setGhostTransform] = useState<string>("translate(0px,0px) scale(1,1)");
 
   const tags = useMemo(() => safeParseTagsJson(asset.ai_tags_json), [asset.ai_tags_json]);
 
@@ -73,6 +80,74 @@ export function AssetLightbox(props: {
     };
   }, [asset.id, projectId]);
 
+  // FLIP animation: animate from the clicked image rect -> final image container rect using CSS transitions.
+  useEffect(() => {
+    const origin = props.originRect ?? null;
+    if (!origin) {
+      setAnimating(false);
+      setGhostStyle(null);
+      setTargetRect(null);
+      return;
+    }
+
+    // Delay 1 tick so layout has painted and we can measure the final target.
+    const t = window.setTimeout(() => {
+      const el = document.querySelector("[data-asset-lightbox-target='true']") as HTMLElement | null;
+      if (!el) {
+        setAnimating(false);
+        return;
+      }
+      const tr = el.getBoundingClientRect();
+      if (!(tr.width > 2 && tr.height > 2)) {
+        setAnimating(false);
+        return;
+      }
+
+      const target: OriginRect = { left: tr.left, top: tr.top, width: tr.width, height: tr.height };
+      setTargetRect(target);
+
+      // Create a ghost layer *at the target position*, then transform it so it visually matches origin,
+      // then transition transform back to identity.
+      setGhostStyle({
+        position: "fixed",
+        left: target.left,
+        top: target.top,
+        width: target.width,
+        height: target.height,
+        zIndex: 10000,
+        pointerEvents: "none",
+        transition: "transform 240ms cubic-bezier(0.2, 0.9, 0.2, 1), opacity 140ms ease-out",
+        transformOrigin: "center center",
+        opacity: 1,
+      });
+
+      const ocx = origin.left + origin.width / 2;
+      const ocy = origin.top + origin.height / 2;
+      const tcx = target.left + target.width / 2;
+      const tcy = target.top + target.height / 2;
+      const dx = ocx - tcx;
+      const dy = ocy - tcy;
+      const sx = origin.width / target.width;
+      const sy = origin.height / target.height;
+
+      // Start at origin.
+      setGhostTransform(`translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`);
+
+      // Then transition to identity on next frame.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => setGhostTransform("translate(0px, 0px) scale(1, 1)"));
+      });
+
+      // End animation.
+      window.setTimeout(() => {
+        setAnimating(false);
+        setGhostStyle(null);
+      }, 260);
+    }, 0);
+
+    return () => window.clearTimeout(t);
+  }, [props.originRect, asset.id]);
+
   return (
     <div
       className={
@@ -83,6 +158,18 @@ export function AssetLightbox(props: {
       aria-modal="true"
       role="dialog"
     >
+      {ghostStyle ? (
+        <div style={{ ...ghostStyle, transform: ghostTransform }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={asset.storage_url}
+            alt=""
+            className="h-full w-full object-contain"
+            draggable={false}
+          />
+        </div>
+      ) : null}
+
       <div
         className={
           "flex h-full w-full flex-col md:flex-row md:gap-0 transition-transform duration-200 ease-out " +
@@ -94,9 +181,10 @@ export function AssetLightbox(props: {
           <div className="relative h-full w-full max-w-[min(1100px,100%)]">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
+              data-asset-lightbox-target="true"
               src={asset.storage_url}
               alt={asset.original_name || "asset"}
-              className="h-full w-full object-contain"
+              className={"h-full w-full object-contain " + (animating ? "opacity-0" : "opacity-100")}
               draggable={false}
             />
           </div>

@@ -216,6 +216,12 @@ export function PixiWorkspace(props: {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [dropError, setDropError] = useState<string | null>(null);
   const [lightboxAssetId, setLightboxAssetId] = useState<string | null>(null);
+  const [lightboxOriginRect, setLightboxOriginRect] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   const objectsRef = useRef<CanvasObjectRow[]>(props.initialObjects);
   useEffect(() => {
@@ -1050,6 +1056,35 @@ export function PixiWorkspace(props: {
 
         const o = objectsRef.current.find((x) => x.id === objectId);
         if (!o || o.type !== "image" || !o.asset_id) return;
+
+        // Compute the clicked sprite rect in *CSS pixels* so the lightbox can do a FLIP transition.
+        const sp = spritesByObjectIdRef.current.get(objectId);
+        const rect = app.canvas.getBoundingClientRect();
+        let origin: { left: number; top: number; width: number; height: number } | null = null;
+        if (sp && rect.width > 0 && rect.height > 0 && app.renderer.width > 0 && app.renderer.height > 0) {
+          try {
+            // `getBounds()` returns global (stage) bounds in renderer coordinates.
+            const b = sp.getBounds();
+            const left = rect.left + (b.x / app.renderer.width) * rect.width;
+            const top = rect.top + (b.y / app.renderer.height) * rect.height;
+            const width = (b.width / app.renderer.width) * rect.width;
+            const height = (b.height / app.renderer.height) * rect.height;
+            if (
+              Number.isFinite(left) &&
+              Number.isFinite(top) &&
+              Number.isFinite(width) &&
+              Number.isFinite(height) &&
+              width > 2 &&
+              height > 2
+            ) {
+              origin = { left, top, width, height };
+            }
+          } catch {
+            origin = null;
+          }
+        }
+
+        setLightboxOriginRect(origin);
         setLightboxAssetId(o.asset_id);
       });
 
@@ -1662,6 +1697,7 @@ export function PixiWorkspace(props: {
         <AssetLightbox
           projectId={props.projectId}
           asset={assetById.get(lightboxAssetId)!}
+          originRect={lightboxOriginRect}
           onClose={() => setLightboxAssetId(null)}
         />
       ) : null}

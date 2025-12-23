@@ -45,6 +45,7 @@ class Job:
     original_name: str
     mime_type: str
     storage_path: str
+    storage_url: str
     sha256: str
 
 
@@ -78,13 +79,17 @@ class LocalStationProvider(MoondreamProvider):
             e = e[:-3]
         self.endpoint = e
 
-    def _encode_image_data_url(self, image_path: str) -> str:
+    def _make_image_url(self, image_ref: str) -> str:
         """
         Send images as a data: URL (Station supports this).
 
         IMPORTANT: Some images can time out if we send the full-resolution bytes.
         We therefore downscale + JPEG-encode by default for speed and reliability.
         """
+        # If caller already passed a usable URL, keep it.
+        if image_ref.startswith("http://") or image_ref.startswith("https://") or image_ref.startswith("data:"):
+            return image_ref
+
         import base64
         import io
         import mimetypes
@@ -92,20 +97,20 @@ class LocalStationProvider(MoondreamProvider):
         # Allow opting out for debugging.
         raw_mode = (os.getenv("MOONDREAM_RAW_IMAGE_BYTES", "0") or "0").lower() in ("1", "true", "yes")
         if raw_mode:
-            mime, _ = mimetypes.guess_type(image_path)
+            mime, _ = mimetypes.guess_type(image_ref)
             if not mime:
                 mime = "image/png"
-            with open(image_path, "rb") as f:
+            with open(image_ref, "rb") as f:
                 data = base64.b64encode(f.read()).decode("ascii")
             return f"data:{mime};base64,{data}"
 
-        max_side = int(os.getenv("MOONDREAM_MAX_IMAGE_SIDE", "1024") or "1024")
+        max_side = int(os.getenv("MOONDREAM_MAX_IMAGE_SIDE", "512") or "512")
         jpeg_quality = int(os.getenv("MOONDREAM_JPEG_QUALITY", "85") or "85")
 
         try:
             from PIL import Image  # type: ignore
 
-            with Image.open(image_path) as im:
+            with Image.open(image_ref) as im:
                 im = im.convert("RGB")
                 w, h = im.size
                 if max_side > 0 and max(w, h) > max_side:
@@ -121,16 +126,16 @@ class LocalStationProvider(MoondreamProvider):
                 return f"data:image/jpeg;base64,{data}"
         except Exception:
             # Fallback: raw bytes in a data URL.
-            mime, _ = mimetypes.guess_type(image_path)
+            mime, _ = mimetypes.guess_type(image_ref)
             if not mime:
                 mime = "image/png"
-            with open(image_path, "rb") as f:
+            with open(image_ref, "rb") as f:
                 data = base64.b64encode(f.read()).decode("ascii")
             return f"data:{mime};base64,{data}"
 
     def caption(self, image_path: str, length: str = "normal") -> str:
         url = f"{self.endpoint}/v1/caption"
-        body = {"stream": False, "length": length, "image_url": self._encode_image_data_url(image_path)}
+        body = {"stream": False, "length": length, "image_url": self._make_image_url(image_path)}
         try:
             r = requests.post(url, json=body, timeout=180)
         except RequestException as exc:
@@ -147,7 +152,7 @@ class LocalStationProvider(MoondreamProvider):
 
     def detect(self, image_path: str, obj: str) -> Any:
         url = f"{self.endpoint}/v1/detect"
-        body = {"stream": False, "object": obj, "image_url": self._encode_image_data_url(image_path)}
+        body = {"stream": False, "object": obj, "image_url": self._make_image_url(image_path)}
         try:
             r = requests.post(url, json=body, timeout=180)
         except RequestException as exc:
@@ -161,7 +166,7 @@ class LocalStationProvider(MoondreamProvider):
 
     def segment(self, image_path: str, obj: str) -> Any:
         url = f"{self.endpoint}/v1/segment"
-        body = {"stream": False, "object": obj, "image_url": self._encode_image_data_url(image_path)}
+        body = {"stream": False, "object": obj, "image_url": self._make_image_url(image_path)}
         try:
             r = requests.post(url, json=body, timeout=180)
         except RequestException as exc:
@@ -175,7 +180,7 @@ class LocalStationProvider(MoondreamProvider):
 
     def query(self, image_path: str, question: str) -> str:
         url = f"{self.endpoint}/v1/query"
-        body = {"stream": False, "question": question, "image_url": self._encode_image_data_url(image_path)}
+        body = {"stream": False, "question": question, "image_url": self._make_image_url(image_path)}
         try:
             r = requests.post(url, json=body, timeout=180)
         except RequestException as exc:
@@ -291,7 +296,14 @@ def connect(db_path: str) -> sqlite3.Connection:
 def fetch_next_job(con: sqlite3.Connection) -> Optional[Job]:
     row = con.execute(
         """
-        SELECT a.id AS asset_id, a.project_id, a.original_name, a.mime_type, a.storage_path, a.sha256
+        SELECT
+          a.id AS asset_id,
+          a.project_id,
+          a.original_name,
+          a.mime_type,
+          a.storage_path,
+          a.storage_url,
+          a.sha256
         FROM assets a
         JOIN asset_ai ai ON ai.asset_id = a.id
         WHERE ai.status IN ('pending', 'processing') AND a.mime_type LIKE 'image/%'
@@ -307,6 +319,7 @@ def fetch_next_job(con: sqlite3.Connection) -> Optional[Job]:
         original_name=row["original_name"],
         mime_type=row["mime_type"],
         storage_path=row["storage_path"],
+        storage_url=row["storage_url"],
         sha256=row["sha256"],
     )
 
@@ -640,18 +653,22 @@ def maybe_rename_asset(con: sqlite3.Connection, job: Job, caption: str, provider
     if (os.getenv("MOONDREAM_GENERATE_NAMES", "1") or "1") in ("0", "false", "False"):
         return
 
-    # Ask Moondream for a concise title for the image.
-    prompt = (
-        "Give a short descriptive title for this image suitable as a filename. "
-        "Respond with ONLY the title words (no punctuation, no quotes), max 6 words."
-    )
+    # Naming strategy:
+    # - default: derive from caption (already from Moondream) to avoid extra API calls
+    # - optional: ask Moondream via /v1/query (more \"title-like\" but slower)
+    name_mode = (os.getenv("MOONDREAM_NAME_MODE", "caption") or "caption").lower()
     title = ""
-    try:
-        title = provider.query(job.storage_path, prompt).strip()
-    except Exception:
-        title = ""
+    if name_mode == "query":
+        prompt = (
+            "Give a short descriptive title for this image suitable as a filename. "
+            "Respond with ONLY the title words (no punctuation, no quotes), max 6 words."
+        )
+        try:
+            title = provider.query(job.storage_path, prompt).strip()
+        except Exception:
+            title = ""
 
-    # Fallback: derive from caption if query fails.
+    # Default/fallback: derive from caption.
     if not title:
         title = (caption or "").strip()
     if not title:
@@ -725,7 +742,19 @@ def main() -> int:
             con.execute("COMMIT")
 
             try:
-                caption = provider.caption(job.storage_path, length="long")
+                image_ref = job.storage_path
+
+                # Caption: default to normal for reliability (fewer Station timeouts).
+                # You can override via MOONDREAM_CAPTION_LENGTH=long/short.
+                caption_length = (os.getenv("MOONDREAM_CAPTION_LENGTH", "normal") or "normal").lower()
+                try:
+                    caption = provider.caption(image_ref, length=caption_length)
+                except ProviderError as exc:
+                    msg = str(exc).lower()
+                    if caption_length == "long" and any(k in msg for k in ("timeout", "timed out")):
+                        caption = provider.caption(image_ref, length="normal")
+                    else:
+                        raise
 
                 # Candidate tags are filtered by detect; we only store detect-confirmed tags.
                 max_tags = int(os.getenv("MOONDREAM_SEGMENT_TOP_N", "8"))
@@ -739,7 +768,7 @@ def main() -> int:
                     if len(kept_tags) >= max_tags:
                         break
                     try:
-                        detect_resp = provider.detect(job.storage_path, cand)
+                        detect_resp = provider.detect(image_ref, cand)
                         boxes = _extract_detect_boxes(detect_resp)
                         if not boxes:
                             continue
@@ -756,7 +785,7 @@ def main() -> int:
                 segments: Dict[str, Optional[str]] = {}
                 for tag in kept_tags:
                     try:
-                        seg_resp = provider.segment(job.storage_path, tag)
+                        seg_resp = provider.segment(image_ref, tag)
                         segments[tag] = _extract_segment_svg(seg_resp)
                     except Exception:
                         segments[tag] = None
