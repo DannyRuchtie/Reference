@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import type { AssetWithAi, CanvasObjectRow, ProjectRow, ProjectViewRow } from "@/server/db/types";
@@ -10,6 +10,17 @@ import { ProjectDropdown } from "@/components/projects/ProjectDropdown";
 
 function clientUuid() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName?.toLowerCase?.() ?? "";
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  // Handles nested contenteditable, e.g. editors that wrap the actual editable node.
+  if (typeof el.closest === "function" && el.closest('[contenteditable="true"]')) return true;
+  return false;
 }
 
 export function ProjectWorkspace(props: {
@@ -34,6 +45,26 @@ export function ProjectWorkspace(props: {
 
   // We intentionally keep the UI minimal (Figma-like): just canvas + a tiny top bar.
 
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") return;
+      if (isEditableTarget(e.target)) return;
+      if (e.repeat) return;
+
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+
+      // "." opens Settings (inside a project context).
+      // Also support Cmd+. / Ctrl+. (matches existing desktop convention).
+      if (e.key === "." && !e.altKey && (!e.metaKey && !e.ctrlKey ? true : mod)) {
+        e.preventDefault();
+        router.push(`/settings?projectId=${encodeURIComponent(project.id)}`);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [project.id, router]);
+
   return (
     <div className="h-screen w-screen bg-zinc-950 text-zinc-50 overflow-hidden">
       <PixiWorkspace
@@ -50,14 +81,6 @@ export function ProjectWorkspace(props: {
       <div className="pointer-events-none absolute inset-x-0 top-0 z-40 h-14 bg-gradient-to-b from-black/50 to-transparent" />
       <div className="absolute left-3 top-3 z-50">
         <ProjectDropdown currentProjectId={project.id} variant="text" align="left" />
-      </div>
-      <div className="absolute right-3 top-3 z-50">
-        <button
-          onClick={() => router.push(`/settings?projectId=${encodeURIComponent(project.id)}`)}
-          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
-        >
-          Settings
-        </button>
       </div>
 
       <AssetCommandPalette

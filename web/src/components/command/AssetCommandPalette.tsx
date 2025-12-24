@@ -22,6 +22,17 @@ export function AssetCommandPalette(props: {
   const [results, setResults] = useState<AssetWithAi[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  function isEditableTarget(target: EventTarget | null) {
+    const el = target as HTMLElement | null;
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName?.toLowerCase?.() ?? "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    // Handles nested contenteditable, e.g. editors that wrap the actual editable node.
+    if (typeof el.closest === "function" && el.closest('[contenteditable="true"]')) return true;
+    return false;
+  }
+
   const objectIdByAssetId = useMemo(() => {
     const m = new Map<string, string>();
     for (const o of props.objects) {
@@ -34,11 +45,28 @@ export function AssetCommandPalette(props: {
     const onKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes("mac");
       const mod = isMac ? e.metaKey : e.ctrlKey;
-      if (mod && e.key.toLowerCase() === "k") {
+      if (e.key === "Escape") setOpen(false);
+
+      const key = e.key.toLowerCase();
+      if (!e.repeat && mod && !e.altKey && key === "k") {
         e.preventDefault();
         setOpen((v) => !v);
+        return;
       }
-      if (e.key === "Escape") setOpen(false);
+
+      // F / Cmd+F: open the command palette. (Note: Cmd/Ctrl+F will override the browser's find-in-page.)
+      if (!e.repeat && mod && !e.altKey && key === "f") {
+        e.preventDefault();
+        setOpen(true);
+        return;
+      }
+
+      if (isEditableTarget(e.target)) return;
+
+      if (!e.repeat && !e.altKey && !e.metaKey && !e.ctrlKey && key === "f") {
+        e.preventDefault();
+        setOpen(true);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);

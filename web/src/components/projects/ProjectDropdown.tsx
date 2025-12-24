@@ -31,6 +31,7 @@ export function ProjectDropdown(props: {
   const [actionsRect, setActionsRect] = useState<Rect | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const actionsBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [isMac, setIsMac] = useState(false);
 
   const [dialog, setDialog] = useState<
     | null
@@ -53,6 +54,10 @@ export function ProjectDropdown(props: {
 
   useEffect(() => {
     refresh();
+  }, []);
+
+  useEffect(() => {
+    setIsMac(navigator.platform.toLowerCase().includes("mac"));
   }, []);
 
   useLayoutEffect(() => {
@@ -229,6 +234,40 @@ export function ProjectDropdown(props: {
                     </div>
                   );
                 })}
+              </div>
+
+              <div className="border-t border-zinc-900 p-2">
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    setActionsFor(null);
+                    window.dispatchEvent(new Event("moondream:command-palette:toggle"));
+                  }}
+                  className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+                >
+                  <span>Search</span>
+                  <span className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                    {isMac ? "⌘K" : "Ctrl+K"}
+                  </span>
+                </button>
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    setActionsFor(null);
+                    router.push(`/settings?projectId=${encodeURIComponent(props.currentProjectId)}`);
+                  }}
+                  className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+                >
+                  <span>Settings</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                      {isMac ? "⌘." : "Ctrl+."}
+                    </span>
+                    <span className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                      .
+                    </span>
+                  </span>
+                </button>
               </div>
             </div>
           </>

@@ -123,6 +123,8 @@ const MAX_ZOOM = 1.0;
 // - Double click should only open the fullscreen/lightbox view when reasonably zoomed in.
 const TAP_MAX_MOVE_PX = 6; // renderer-space px
 const FULLSCREEN_DBLCLICK_FIT_FACTOR = 0.75; // fraction of "fit zoom" considered "zoomed in"
+const MINIMAP_SELECT_MIN_PX = 10; // minimap-local px; below this we treat it as a click-to-center
+const MINIMAP_FIT_SCREEN_FRACTION = 0.94; // keep a little padding when zoom-fitting via minimap drag
 
 // Default "landscape" shape for the manual ripple test (R) when no item is selected.
 // 16:9 was still a bit subtle; use a wider ellipse so it reads clearly as landscape.
@@ -313,6 +315,7 @@ export function PixiWorkspace(props: {
   const selectionBoxRef = useRef<PIXI.Graphics | null>(null);
   const handleRefs = useRef<Record<string, PIXI.Graphics>>({});
   const multiSelectionRef = useRef<PIXI.Graphics | null>(null);
+  const minimapPinnedRef = useRef(false);
   const minimapRef = useRef<{
     container: PIXI.Container;
     bg: PIXI.Graphics;
@@ -321,6 +324,21 @@ export function PixiWorkspace(props: {
     shade: PIXI.Graphics;
     overlay: PIXI.Graphics;
     viewport: PIXI.Graphics;
+    interact: PIXI.Graphics;
+    map:
+      | null
+      | {
+          minX: number;
+          minY: number;
+          maxX: number;
+          maxY: number;
+          s: number;
+          offsetX: number;
+          offsetY: number;
+          pad: number;
+          innerW: number;
+          innerH: number;
+        };
     showUntilMs: number;
     targetAlpha: number;
   } | null>(null);
@@ -338,6 +356,7 @@ export function PixiWorkspace(props: {
         baseW: number;
         baseH: number;
       }
+    | { kind: "minimap"; start: PIXI.Point; cur: PIXI.Point }
   >(null);
 
   // Click/tap detection for "zoom in on click when zoomed out".
@@ -1382,6 +1401,26 @@ export function PixiWorkspace(props: {
         return;
       }
 
+    // Toggle minimap visibility (pinned vs auto) with "M".
+    // Note: even when "hidden" (auto), it should still appear during pan/zoom (via showMinimap()).
+    if (!isTyping && (e.key === "m" || e.key === "M")) {
+      e.preventDefault();
+      minimapPinnedRef.current = !minimapPinnedRef.current;
+      const mm = minimapRef.current;
+      if (mm) {
+        if (minimapPinnedRef.current) {
+          mm.showUntilMs = Infinity;
+          mm.targetAlpha = 1;
+          mm.container.visible = true;
+        } else {
+          // Hide at rest; interaction will still call showMinimap().
+          mm.showUntilMs = 0;
+          mm.targetAlpha = 0;
+        }
+      }
+      return;
+    }
+
       // Reset zoom to 10% with "0".
       if (!isTyping && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
         e.preventDefault();
@@ -1719,6 +1758,10 @@ void main()
       const minimapViewport = new PIXI.Graphics();
       minimapClipLayer.addChild(minimapViewport);
 
+      // Interaction affordance (rubber-band selection) lives above the viewport stroke.
+      const minimapInteract = new PIXI.Graphics();
+      minimapClipLayer.addChild(minimapInteract);
+
       minimapRef.current = {
         container: minimapContainer,
         bg: minimapBg,
@@ -1727,6 +1770,8 @@ void main()
         shade: minimapShade,
         overlay: minimapOverlay,
         viewport: minimapViewport,
+        interact: minimapInteract,
+        map: null,
         showUntilMs: 0,
         targetAlpha: 0,
       };
@@ -1801,6 +1846,23 @@ void main()
         // Avoid hover-preview sticking while dragging/gesturing.
         setHoveredVideoObjectId(null);
         last = screenToRendererPoint(e.clientX, e.clientY);
+
+        // Minimap interaction: click/drag on the minimap to center/zoom to the selected region.
+        {
+          const mm = minimapRef.current;
+          if (mm && mm.container.visible && mm.container.alpha > 0.25 && mm.map) {
+            const local = minimapRendererPointToLocal(last.x, last.y);
+            if (local && local.x >= 0 && local.y >= 0 && local.x <= minimapW && local.y <= minimapH) {
+              showMinimap();
+              mm.showUntilMs = performance.now() + 10_000; // keep visible while interacting
+              activeGestureRef.current = { kind: "minimap", start: local, cur: local };
+              tapCandidateRef.current = null;
+              drawMinimapSelection(local, local);
+              return;
+            }
+          }
+        }
+
         const hit = app.renderer.events.rootBoundary.hitTest(last.x, last.y) as any;
         tapCandidateRef.current = {
           pointerId: e.pointerId,
@@ -1913,6 +1975,19 @@ void main()
           return;
         }
 
+        if (gesture.kind === "minimap") {
+          showMinimap();
+          const mm = minimapRef.current;
+          if (!mm || !mm.map) return;
+          mm.showUntilMs = performance.now() + 10_000; // keep visible while interacting
+          const local = minimapRendererPointToLocal(cur.x, cur.y);
+          if (!local) return;
+          const next = { kind: "minimap" as const, start: gesture.start, cur: local };
+          activeGestureRef.current = next;
+          drawMinimapSelection(next.start, next.cur);
+          return;
+        }
+
         if (gesture.kind === "pan") {
           showMinimap();
           const dx = cur.x - gesture.last.x;
@@ -2020,6 +2095,71 @@ void main()
         const g = activeGestureRef.current;
         if (g && g.kind === "move") {
           setShadowLiftTarget(g.objectIds, 0);
+        }
+
+        if (g && g.kind === "minimap") {
+          const mm = minimapRef.current;
+          const world = worldRef.current;
+          const app = appRef.current;
+          if (mm) mm.interact.clear();
+
+          if (mm && mm.map && world && app) {
+            const a = g.start;
+            const b = g.cur;
+            const dx = Math.abs(a.x - b.x);
+            const dy = Math.abs(a.y - b.y);
+
+            const m = mm.map;
+            const x0 = clamp(Math.min(a.x, b.x), m.pad, m.pad + m.innerW);
+            const y0 = clamp(Math.min(a.y, b.y), m.pad, m.pad + m.innerH);
+            const x1 = clamp(Math.max(a.x, b.x), m.pad, m.pad + m.innerW);
+            const y1 = clamp(Math.max(a.y, b.y), m.pad, m.pad + m.innerH);
+
+            const p0 = minimapLocalToWorld(new PIXI.Point(x0, y0));
+            const p1 = minimapLocalToWorld(new PIXI.Point(x1, y1));
+            if (p0 && p1) {
+              const minWX = Math.min(p0.x, p1.x);
+              const maxWX = Math.max(p0.x, p1.x);
+              const minWY = Math.min(p0.y, p1.y);
+              const maxWY = Math.max(p0.y, p1.y);
+              const w = Math.max(1e-3, maxWX - minWX);
+              const h = Math.max(1e-3, maxWY - minWY);
+              const cx = (minWX + maxWX) / 2;
+              const cy = (minWY + maxWY) / 2;
+
+              const isClick = dx < MINIMAP_SELECT_MIN_PX && dy < MINIMAP_SELECT_MIN_PX;
+              const nextZoom = isClick
+                ? clamp(world.scale.x || 1, MIN_ZOOM, MAX_ZOOM)
+                : clamp(
+                    Math.min(
+                      (app.renderer.width * MINIMAP_FIT_SCREEN_FRACTION) / w,
+                      (app.renderer.height * MINIMAP_FIT_SCREEN_FRACTION) / h
+                    ),
+                    MIN_ZOOM,
+                    MAX_ZOOM
+                  );
+
+              const endX = app.renderer.width / 2 - cx * nextZoom;
+              const endY = app.renderer.height / 2 - cy * nextZoom;
+              cancelViewAnimation();
+              animateViewTo(
+                { x: endX, y: endY, zoom: nextZoom },
+                {
+                  durationMs: isClick ? 220 : 300,
+                  onComplete: () => {
+                    const w2 = worldRef.current;
+                    if (!w2) return;
+                    scheduleViewSave({
+                      world_x: w2.position.x,
+                      world_y: w2.position.y,
+                      zoom: w2.scale.x,
+                    });
+                    schedulePreviewSave();
+                  },
+                }
+              );
+            }
+          }
         }
         activeGestureRef.current = null;
         schedulePreviewSave();
@@ -2265,6 +2405,41 @@ void main()
         mm.container.visible = true;
       };
 
+      const minimapRendererPointToLocal = (rx: number, ry: number) => {
+        const mm = minimapRef.current;
+        if (!mm) return null;
+        return new PIXI.Point(rx - mm.container.position.x, ry - mm.container.position.y);
+      };
+
+      const minimapLocalToWorld = (local: PIXI.Point) => {
+        const mm = minimapRef.current;
+        if (!mm || !mm.map) return null;
+        const m = mm.map;
+        const safeS = Math.max(1e-6, m.s);
+        const x = m.minX + (local.x - m.offsetX) / safeS;
+        const y = m.minY + (local.y - m.offsetY) / safeS;
+        return new PIXI.Point(x, y);
+      };
+
+      const drawMinimapSelection = (a: PIXI.Point, b: PIXI.Point) => {
+        const mm = minimapRef.current;
+        if (!mm || !mm.map) return;
+        const m = mm.map;
+        const x0 = clamp(Math.min(a.x, b.x), m.pad, m.pad + m.innerW);
+        const y0 = clamp(Math.min(a.y, b.y), m.pad, m.pad + m.innerH);
+        const x1 = clamp(Math.max(a.x, b.x), m.pad, m.pad + m.innerW);
+        const y1 = clamp(Math.max(a.y, b.y), m.pad, m.pad + m.innerH);
+        const w = Math.max(0, x1 - x0);
+        const h = Math.max(0, y1 - y0);
+        mm.interact.clear();
+        if (w <= 0 || h <= 0) return;
+        mm.interact.beginFill(THEME_ACCENT, 0.10);
+        mm.interact.drawRect(x0, y0, w, h);
+        mm.interact.endFill();
+        mm.interact.lineStyle(2, THEME_ACCENT, 0.95);
+        mm.interact.drawRect(x0 + 1, y0 + 1, Math.max(0, w - 2), Math.max(0, h - 2));
+      };
+
       const updateMinimap = () => {
         const mm = minimapRef.current;
         if (!mm) return;
@@ -2276,7 +2451,13 @@ void main()
         );
 
         const now = performance.now();
-        if (now > mm.showUntilMs) mm.targetAlpha = 0;
+        if (minimapPinnedRef.current) {
+          mm.showUntilMs = Infinity;
+          mm.targetAlpha = 1;
+          mm.container.visible = true;
+        } else {
+          if (now > mm.showUntilMs) mm.targetAlpha = 0;
+        }
 
         // Fade in/out smoothly.
         const fadeSpeed = 0.18;
@@ -2329,6 +2510,9 @@ void main()
 
         const wxToMx = (x: number) => offsetX + (x - minX) * s;
         const wyToMy = (y: number) => offsetY + (y - minY) * s;
+
+        // Persist the mapping so minimap interaction can translate minimap-local coords -> world coords.
+        mm.map = { minX, minY, maxX, maxY, s, offsetX, offsetY, pad, innerW, innerH };
 
         // Draw items as a scaled preview of the canvas (same textures, scaled to match world size).
         const seen = new Set<string>();
