@@ -451,18 +451,8 @@ export function AssetLightbox(props: {
                       {asset.ai_caption}
                     </div>
                   ) : null}
-                  {tags.length ? (
-                    <div className="flex flex-wrap gap-2">
-                      {tags.slice(0, 64).map((t) => (
-                        <div
-                          key={t}
-                          className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-xs text-zinc-200"
-                        >
-                          {t}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
+                  {/* Note: we keep `asset.ai_tags_json` for search, but we intentionally don't show these
+                      generic tags in the fullscreen UI (segments are shown below). */}
                 </div>
               </section>
 
