@@ -44,6 +44,13 @@ export function AssetCommandPalette(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // Desktop menu bridge (Tauri): allow opening/toggling via native menu item.
+  useEffect(() => {
+    const onToggle = () => setOpen((v) => !v);
+    window.addEventListener("moondream:command-palette:toggle", onToggle as EventListener);
+    return () => window.removeEventListener("moondream:command-palette:toggle", onToggle as EventListener);
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     const t = window.setTimeout(async () => {

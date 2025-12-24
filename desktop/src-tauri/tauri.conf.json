@@ -23,6 +23,7 @@
         "resources/next/node_modules",
         "resources/next/.next",
         "resources/bin/node",
+        "resources/bin/moondream-worker",
         "resources/bin/README.md"
       ]
     },

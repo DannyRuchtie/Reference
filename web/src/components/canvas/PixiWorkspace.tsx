@@ -1050,6 +1050,170 @@ export function PixiWorkspace(props: {
 
   // Keyboard delete/backspace to remove selected objects from canvas + DB (via canvas save).
   useEffect(() => {
+    const resetZoomToTenPercent = () => {
+      const app = appRef.current;
+      const world = worldRef.current;
+      if (!app || !world) return;
+
+      // Keep the current viewport center pinned while zooming out.
+      const center = new PIXI.Point(app.renderer.width / 2, app.renderer.height / 2);
+      const centerWorld = world.toLocal(center);
+      const nextZoom = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
+      const endX = center.x - centerWorld.x * nextZoom;
+      const endY = center.y - centerWorld.y * nextZoom;
+
+      cancelViewAnimation();
+      animateViewTo(
+        { x: endX, y: endY, zoom: nextZoom },
+        {
+          durationMs: 260,
+          onComplete: () => {
+            const w2 = worldRef.current;
+            if (!w2) return;
+            scheduleViewSave({
+              world_x: w2.position.x,
+              world_y: w2.position.y,
+              zoom: w2.scale.x,
+            });
+            schedulePreviewSave();
+          },
+        }
+      );
+    };
+
+    const focusToggle = (opts: { requireHover: boolean }) => {
+      const app = appRef.current;
+      const world = worldRef.current;
+      if (!app || !world) return;
+
+      if (opts.requireHover && !canvasHoverRef.current) return;
+
+      const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+      if (!selectedId) return;
+      const sp = spritesByObjectIdRef.current.get(selectedId) as PIXI.Sprite | undefined;
+      if (!sp) return;
+
+      const currentZoom = world.scale.x || 1;
+      const fitZoom =
+        fitZoomForSprite(sp, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ?? null;
+      // Space should feel like "zoom in", so never zoom out when focusing.
+      const nextZoom = clamp(Math.max(currentZoom * 1.6, fitZoom ?? 0, currentZoom), MIN_ZOOM, MAX_ZOOM);
+      const p = sp.position;
+      const endX = app.renderer.width / 2 - p.x * nextZoom;
+      const endY = app.renderer.height / 2 - p.y * nextZoom;
+
+      const currentView = { x: world.position.x, y: world.position.y, zoom: world.scale.x || 1 };
+      const focusView = { x: endX, y: endY, zoom: nextZoom };
+
+      // Compute the exact same zoom-out target as pressing "0": 10% zoom,
+      // keeping the current viewport center pinned in world space.
+      const center = new PIXI.Point(app.renderer.width / 2, app.renderer.height / 2);
+      const centerWorld = world.toLocal(center);
+      const outZoom = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
+      const outView = {
+        x: center.x - centerWorld.x * outZoom,
+        y: center.y - centerWorld.y * outZoom,
+        zoom: outZoom,
+      };
+
+      // Decide which direction to toggle based on which endpoint we are closer to.
+      const dFocus = viewDistance(currentView, focusView);
+      const dOut = viewDistance(currentView, outView);
+      const goingTo = dFocus <= dOut ? outView : focusView;
+
+      cancelViewAnimation();
+      animateViewTo(
+        goingTo,
+        {
+          durationMs: 320,
+          onComplete: () => {
+            const w2 = worldRef.current;
+            if (!w2) return;
+            scheduleViewSave({
+              world_x: w2.position.x,
+              world_y: w2.position.y,
+              zoom: w2.scale.x,
+            });
+            schedulePreviewSave();
+          },
+        }
+      );
+    };
+
+    const deleteSelection = async () => {
+      const ids = selectedIdsRef.current;
+      if (!ids || ids.length === 0) return;
+
+      // Confirmation: only prompt when deleting images from the board.
+      const currentObjects = objectsRef.current ?? [];
+      const removeSet = new Set(ids);
+      const selectedImageObjects = currentObjects.filter((o) => removeSet.has(o.id) && o.type === "image");
+      if (selectedImageObjects.length > 0) {
+        const removedAssetIds = new Set<string>();
+        for (const o of selectedImageObjects) {
+          if (o.asset_id) removedAssetIds.add(o.asset_id);
+        }
+        const remainingAssetIds = new Set<string>();
+        for (const o of currentObjects) {
+          if (removeSet.has(o.id)) continue;
+          if (o.type !== "image") continue;
+          if (!o.asset_id) continue;
+          remainingAssetIds.add(o.asset_id);
+        }
+        const assetsThatWouldBeDeleted = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
+
+        const msg =
+          assetsThatWouldBeDeleted.length > 0
+            ? `Delete ${selectedImageObjects.length} image(s) from the board?\n\nThis will also permanently delete ${assetsThatWouldBeDeleted.length} asset(s) from the project because nothing else is using them.`
+            : `Delete ${selectedImageObjects.length} image(s) from the board?`;
+        if (!window.confirm(msg)) return;
+      }
+
+      setSelectedIds([]);
+      let nextObjects: CanvasObjectRow[] | null = null;
+      let assetsToDelete: string[] = [];
+      setObjects((prev) => {
+        const remove = new Set(ids);
+        const next = prev.filter((o) => !remove.has(o.id));
+
+        // Determine which underlying assets can be deleted safely:
+        // only delete an asset if ALL objects referencing it are being removed.
+        const removedAssetIds = new Set<string>();
+        for (const o of prev) {
+          if (!remove.has(o.id)) continue;
+          if (o.type !== "image") continue;
+          if (!o.asset_id) continue;
+          removedAssetIds.add(o.asset_id);
+        }
+
+        const remainingAssetIds = new Set<string>();
+        for (const o of next) {
+          if (o.type !== "image") continue;
+          if (!o.asset_id) continue;
+          remainingAssetIds.add(o.asset_id);
+        }
+
+        assetsToDelete = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
+        nextObjects = next;
+
+        scheduleEmitObjectsChange(next);
+        return next;
+      });
+
+      window.setTimeout(async () => {
+        if (!nextObjects) return;
+        await saveNow(nextObjects);
+        schedulePreviewSave();
+
+        if (assetsToDelete.length) {
+          for (const assetId of assetsToDelete) {
+            await fetch(`/api/assets/${assetId}`, { method: "DELETE" }).catch(() => {});
+          }
+          setAssets((prev) => prev.filter((a) => !assetsToDelete.includes(a.id)));
+        }
+      }, 0);
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       // Don't intercept when typing.
       const el = document.activeElement as HTMLElement | null;
@@ -1093,36 +1257,8 @@ export function PixiWorkspace(props: {
 
       // Reset zoom to 10% with "0".
       if (!isTyping && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
-        const app = appRef.current;
-        const world = worldRef.current;
-        if (!app || !world) return;
-
         e.preventDefault();
-
-        // Keep the current viewport center pinned while zooming out.
-        const center = new PIXI.Point(app.renderer.width / 2, app.renderer.height / 2);
-        const centerWorld = world.toLocal(center);
-        const nextZoom = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
-        const endX = center.x - centerWorld.x * nextZoom;
-        const endY = center.y - centerWorld.y * nextZoom;
-
-        cancelViewAnimation();
-        animateViewTo(
-          { x: endX, y: endY, zoom: nextZoom },
-          {
-            durationMs: 260,
-            onComplete: () => {
-              const w2 = worldRef.current;
-              if (!w2) return;
-              scheduleViewSave({
-                world_x: w2.position.x,
-                world_y: w2.position.y,
-                zoom: w2.scale.x,
-              });
-              schedulePreviewSave();
-            },
-          }
-        );
+        resetZoomToTenPercent();
         return;
       }
 
@@ -1130,155 +1266,30 @@ export function PixiWorkspace(props: {
       // - toggles between focusing the selected element and the same zoom-out target as pressing "0"
       // NOTE: Space is a common "page scroll" key, so only trigger when pointer is over the canvas.
       if (!isTyping && canvasHoverRef.current && (e.code === "Space" || e.key === " " || e.key === "Spacebar")) {
-        const app = appRef.current;
-        const world = worldRef.current;
-        if (!app || !world) return;
-
-        const selectedId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
-        if (!selectedId) return;
-        const sp = spritesByObjectIdRef.current.get(selectedId) as PIXI.Sprite | undefined;
-        if (!sp) return;
-
-        const currentZoom = world.scale.x || 1;
-        const fitZoom =
-          fitZoomForSprite(sp, app.renderer.width, app.renderer.height, FOCUS_FIT_SCREEN_FRACTION) ?? null;
-        // Space should feel like "zoom in", so never zoom out when focusing.
-        // Even if fitZoom is smaller, we still zoom in by a fixed factor for continuity.
-        const nextZoom = clamp(Math.max(currentZoom * 1.6, fitZoom ?? 0, currentZoom), MIN_ZOOM, MAX_ZOOM);
-        const p = sp.position;
-        const endX = app.renderer.width / 2 - p.x * nextZoom;
-        const endY = app.renderer.height / 2 - p.y * nextZoom;
-
         e.preventDefault();
-
-        const currentView = { x: world.position.x, y: world.position.y, zoom: world.scale.x || 1 };
-        const focusView = { x: endX, y: endY, zoom: nextZoom };
-
-        // Compute the exact same zoom-out target as pressing "0": 10% zoom,
-        // keeping the current viewport center pinned in world space.
-        const center = new PIXI.Point(app.renderer.width / 2, app.renderer.height / 2);
-        const centerWorld = world.toLocal(center);
-        const outZoom = clamp(0.1, MIN_ZOOM, MAX_ZOOM);
-        const outView = {
-          x: center.x - centerWorld.x * outZoom,
-          y: center.y - centerWorld.y * outZoom,
-          zoom: outZoom,
-        };
-
-        // Decide which direction to toggle based on which endpoint we are closer to.
-        const dFocus = viewDistance(currentView, focusView);
-        const dOut = viewDistance(currentView, outView);
-        const goingTo = dFocus <= dOut ? outView : focusView;
-
-        cancelViewAnimation();
-        animateViewTo(
-          goingTo,
-          {
-            durationMs: 320,
-            onComplete: () => {
-              const w2 = worldRef.current;
-              if (!w2) return;
-              scheduleViewSave({
-                world_x: w2.position.x,
-                world_y: w2.position.y,
-                zoom: w2.scale.x,
-              });
-              schedulePreviewSave();
-            },
-          }
-        );
+        focusToggle({ requireHover: true });
         return;
       }
 
+      if (isTyping) return;
       if (e.key !== "Backspace" && e.key !== "Delete") return;
-      if (isTyping) {
-        return;
-      }
-      const ids = selectedIdsRef.current;
-      if (!ids || ids.length === 0) return;
       e.preventDefault();
-
-      // Confirmation: only prompt when deleting images from the board.
-      // (Non-image objects like shapes/text delete immediately as before.)
-      const currentObjects = objectsRef.current ?? [];
-      const removeSet = new Set(ids);
-      const selectedImageObjects = currentObjects.filter(
-        (o) => removeSet.has(o.id) && o.type === "image"
-      );
-      if (selectedImageObjects.length > 0) {
-        const removedAssetIds = new Set<string>();
-        for (const o of selectedImageObjects) {
-          if (o.asset_id) removedAssetIds.add(o.asset_id);
-        }
-        const remainingAssetIds = new Set<string>();
-        for (const o of currentObjects) {
-          if (removeSet.has(o.id)) continue;
-          if (o.type !== "image") continue;
-          if (!o.asset_id) continue;
-          remainingAssetIds.add(o.asset_id);
-        }
-        const assetsThatWouldBeDeleted = [...removedAssetIds].filter(
-          (id) => !remainingAssetIds.has(id)
-        );
-
-        const msg =
-          assetsThatWouldBeDeleted.length > 0
-            ? `Delete ${selectedImageObjects.length} image(s) from the board?\n\nThis will also permanently delete ${assetsThatWouldBeDeleted.length} asset(s) from the project because nothing else is using them.`
-            : `Delete ${selectedImageObjects.length} image(s) from the board?`;
-        if (!window.confirm(msg)) return;
-      }
-
-      setSelectedIds([]);
-      let nextObjects: CanvasObjectRow[] | null = null;
-      let assetsToDelete: string[] = [];
-      setObjects((prev) => {
-        const remove = new Set(ids);
-        const next = prev.filter((o) => !remove.has(o.id));
-
-        // Determine which underlying assets can be deleted safely:
-        // only delete an asset if ALL objects referencing it are being removed.
-        const removedAssetIds = new Set<string>();
-        for (const o of prev) {
-          if (!remove.has(o.id)) continue;
-          if (o.type !== "image") continue;
-          if (!o.asset_id) continue;
-          removedAssetIds.add(o.asset_id);
-        }
-
-        const remainingAssetIds = new Set<string>();
-        for (const o of next) {
-          if (o.type !== "image") continue;
-          if (!o.asset_id) continue;
-          remainingAssetIds.add(o.asset_id);
-        }
-
-        assetsToDelete = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
-        nextObjects = next;
-
-        scheduleEmitObjectsChange(next);
-        // We'll save immediately so DB references are updated before deleting assets.
-        // (Avoids 409 due to stale canvas_objects rows.)
-        return next;
-      });
-
-      // Persist the canvas update immediately, then delete assets from DB (and disk).
-      // Fire-and-forget for snappy UX.
-      window.setTimeout(async () => {
-        if (!nextObjects) return;
-        await saveNow(nextObjects);
-        schedulePreviewSave();
-
-        if (assetsToDelete.length) {
-          for (const assetId of assetsToDelete) {
-            await fetch(`/api/assets/${assetId}`, { method: "DELETE" }).catch(() => {});
-          }
-          // Optimistically remove from local asset cache (drag/drop + minimap textures).
-          setAssets((prev) => prev.filter((a) => !assetsToDelete.includes(a.id)));
-        }
-      }, 0);
+      void deleteSelection();
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    const onResetZoom = () => resetZoomToTenPercent();
+    const onFocusToggle = () => focusToggle({ requireHover: false });
+    const onDeleteSelection = () => void deleteSelection();
+    window.addEventListener("moondream:canvas:reset-zoom", onResetZoom as EventListener);
+    window.addEventListener("moondream:canvas:focus-toggle", onFocusToggle as EventListener);
+    window.addEventListener("moondream:canvas:delete-selection", onDeleteSelection as EventListener);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("moondream:canvas:reset-zoom", onResetZoom as EventListener);
+      window.removeEventListener("moondream:canvas:focus-toggle", onFocusToggle as EventListener);
+      window.removeEventListener("moondream:canvas:delete-selection", onDeleteSelection as EventListener);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2780,23 +2791,21 @@ void main()
       {showBootUi ? (
         <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center">
           <div className="rounded-xl border border-white/10 bg-black/60 px-4 py-3 text-sm text-zinc-200 backdrop-blur">
-            {syncUi.syncing ? "Syncing…" : "Loading…"}
+            {"Loading…"}
           </div>
         </div>
       ) : null}
-      {!syncUi.online || syncUi.syncing || syncUi.dirtyCanvas || syncUi.dirtyView ? (
+      {!syncUi.online ? (
         <div className="pointer-events-none absolute right-4 top-4 z-50">
           <div
             className={
               "rounded-full border px-3 py-1 text-[11px] font-medium " +
               (!syncUi.online
                 ? "border-red-900/50 bg-red-950/50 text-red-200"
-                : syncUi.syncing
-                  ? "border-amber-900/40 bg-amber-950/35 text-amber-200"
-                  : "border-amber-900/40 bg-amber-950/35 text-amber-200")
+                : "border-amber-900/40 bg-amber-950/35 text-amber-200")
             }
           >
-            {!syncUi.online ? "Offline" : syncUi.syncing ? "Syncing…" : "Unsynced"}
+            {"Offline"}
           </div>
         </div>
       ) : null}

@@ -294,8 +294,10 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def fetch_next_job(con: sqlite3.Connection) -> Optional[Job]:
+    retry_failed = (os.getenv("MOONDREAM_RETRY_FAILED", "0") or "0").lower() in ("1", "true", "yes")
+    statuses = "('pending','processing','failed')" if retry_failed else "('pending','processing')"
     row = con.execute(
-        """
+        f"""
         SELECT
           a.id AS asset_id,
           a.project_id,
@@ -306,7 +308,7 @@ def fetch_next_job(con: sqlite3.Connection) -> Optional[Job]:
           a.sha256
         FROM assets a
         JOIN asset_ai ai ON ai.asset_id = a.id
-        WHERE ai.status IN ('pending', 'processing') AND a.mime_type LIKE 'image/%'
+        WHERE ai.status IN {statuses} AND a.mime_type LIKE 'image/%'
         ORDER BY ai.updated_at ASC
         LIMIT 1
         """
@@ -1128,7 +1130,20 @@ def main() -> int:
             except ProviderError as exc:
                 # Treat station-side queue/timeouts as transient; re-queue with a small backoff.
                 msg = str(exc).lower()
-                transient = any(k in msg for k in ("queue is full", "rejected", "timeout", "timed out"))
+                transient = any(
+                    k in msg
+                    for k in (
+                        "queue is full",
+                        "rejected",
+                        "timeout",
+                        "timed out",
+                        # Local Station not running / network hiccups should NOT mark the asset failed.
+                        "connection refused",
+                        "failed to establish a new connection",
+                        "max retries exceeded",
+                        "connection error",
+                    )
+                )
                 con.execute("BEGIN")
                 if transient:
                     # Re-queue without poisoning the caption field.

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 import type { AssetWithAi, CanvasObjectRow, ProjectRow, ProjectViewRow } from "@/server/db/types";
 import { PixiWorkspace } from "@/components/canvas/PixiWorkspace";
@@ -18,6 +19,7 @@ export function ProjectWorkspace(props: {
   initialView: ProjectViewRow | null;
 }) {
   const { project } = props;
+  const router = useRouter();
   const [objects, setObjects] = useState<CanvasObjectRow[]>(props.initialObjects);
   const [highlight, setHighlight] = useState<{
     assetId: string;
@@ -48,6 +50,14 @@ export function ProjectWorkspace(props: {
       <div className="pointer-events-none absolute inset-x-0 top-0 z-40 h-14 bg-gradient-to-b from-black/50 to-transparent" />
       <div className="absolute left-3 top-3 z-50">
         <ProjectDropdown currentProjectId={project.id} variant="text" align="left" />
+      </div>
+      <div className="absolute right-3 top-3 z-50">
+        <button
+          onClick={() => router.push(`/settings?projectId=${encodeURIComponent(project.id)}`)}
+          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
+        >
+          Settings
+        </button>
       </div>
 
       <AssetCommandPalette

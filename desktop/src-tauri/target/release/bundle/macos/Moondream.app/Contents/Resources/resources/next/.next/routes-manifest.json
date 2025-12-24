@@ -38,6 +38,14 @@
       "namedRegex": "^/api/projects/(?<nxtPprojectId>[^/]+?)(?:/)?$"
     },
     {
+      "page": "/api/projects/[projectId]/ai/retry",
+      "regex": "^/api/projects/([^/]+?)/ai/retry(?:/)?$",
+      "routeKeys": {
+        "nxtPprojectId": "nxtPprojectId"
+      },
+      "namedRegex": "^/api/projects/(?<nxtPprojectId>[^/]+?)/ai/retry(?:/)?$"
+    },
+    {
       "page": "/api/projects/[projectId]/assets",
       "regex": "^/api/projects/([^/]+?)/assets(?:/)?$",
       "routeKeys": {
@@ -155,10 +163,22 @@
       "namedRegex": "^/api/projects(?:/)?$"
     },
     {
+      "page": "/api/settings",
+      "regex": "^/api/settings(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/settings(?:/)?$"
+    },
+    {
       "page": "/favicon.ico",
       "regex": "^/favicon\\.ico(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/favicon\\.ico(?:/)?$"
+    },
+    {
+      "page": "/settings",
+      "regex": "^/settings(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings(?:/)?$"
     }
   ],
   "dataRoutes": [],
