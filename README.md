@@ -1,4 +1,4 @@
-## Moondream Invite Canvas
+## Moondream Canvas
 
 High‑performance, Figma‑like canvas for building layouts by dropping images onto an infinite board, arranging them with fast transforms (move/resize/rotate), and keeping everything **local‑first**.
 
@@ -249,8 +249,3 @@ flowchart LR
 ```
 
 
-## Todo
-
--[ ] riple aspect ratio
--[x] keyboard arrow navigation 
-- zoom back to fit image after arrow navigation 
