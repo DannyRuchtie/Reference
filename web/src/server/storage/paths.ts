@@ -21,6 +21,18 @@ export function projectThumbsDir(projectId: string) {
   return path.join(projectDir(projectId), "thumbs");
 }
 
+export function projectTrashDir(projectId: string) {
+  return path.join(projectDir(projectId), "trash");
+}
+
+export function projectTrashAssetsDir(projectId: string) {
+  return path.join(projectTrashDir(projectId), "assets");
+}
+
+export function projectTrashThumbsDir(projectId: string) {
+  return path.join(projectTrashDir(projectId), "thumbs");
+}
+
 export function projectPreviewDiskPath(projectId: string) {
   return path.join(projectDir(projectId), "preview.webp");
 }

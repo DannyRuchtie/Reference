@@ -24,6 +24,9 @@ export type AssetRow = {
   storage_url: string;
   thumb_path: string | null;
   thumb_url: string | null;
+  deleted_at: string | null;
+  trashed_storage_path: string | null;
+  trashed_thumb_path: string | null;
   width: number | null;
   height: number | null;
   created_at: string;

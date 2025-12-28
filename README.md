@@ -1,4 +1,4 @@
-## Moondream Invite Canvas
+## Moondream Canvas
 
 High‑performance, Figma‑like canvas for building layouts by dropping images onto an infinite board, arranging them with fast transforms (move/resize/rotate), and keeping everything **local‑first**.
 
@@ -14,8 +14,6 @@ High‑performance, Figma‑like canvas for building layouts by dropping images 
    <img src="screen-3.jpg" alt="Asset lightbox with AI caption/tags and segments" width="860" />
 
 ## What this is
-
-This repo is an MVP for a fast, responsive design surface:
 
 - Drop images onto the canvas (drag & drop)
 - Pan/zoom an infinite board (with a minimap)

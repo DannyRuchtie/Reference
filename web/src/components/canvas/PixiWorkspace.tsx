@@ -426,6 +426,21 @@ export function PixiWorkspace(props: {
   const [assets, setAssets] = useState<AssetWithAi[]>(props.initialAssets);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [dropError, setDropError] = useState<string | null>(null);
+  const UNDO_DELETE_MAX = 10;
+  type DeleteUndoEntry = {
+    deletedCount: number;
+    deletedAssetIds: string[];
+    prevObjects: CanvasObjectRow[];
+    prevAssets: AssetWithAi[];
+  };
+  const [deleteUndoStack, setDeleteUndoStack] = useState<DeleteUndoEntry[]>([]);
+  // Key handlers are registered once; keep the latest undo stack available via ref.
+  const deleteUndoStackRef = useRef<DeleteUndoEntry[]>([]);
+  deleteUndoStackRef.current = deleteUndoStack;
+  const assetsRef = useRef<AssetWithAi[]>(props.initialAssets);
+  useEffect(() => {
+    assetsRef.current = assets;
+  }, [assets]);
   const [lightboxAssetId, setLightboxAssetId] = useState<string | null>(null);
   const initialViewOverrideRef = useRef<{ world_x: number; world_y: number; zoom: number } | null>(null);
   const [booting, setBooting] = useState(true);
@@ -438,6 +453,31 @@ export function PixiWorkspace(props: {
     dirtyView: false,
     syncing: false,
   }));
+
+  useEffect(() => {
+    // Undo history should never span projects.
+    setDeleteUndoStack([]);
+  }, [projectId]);
+
+  const runUndoDelete = async () => {
+    const stack = deleteUndoStackRef.current;
+    const ud = stack.length ? stack[stack.length - 1] : null;
+    if (!ud) return;
+    setDeleteUndoStack((prev) => (prev.length ? prev.slice(0, -1) : prev));
+    setSelectedIds([]);
+    setAssets(ud.prevAssets);
+    setObjects(ud.prevObjects);
+    scheduleEmitObjectsChange(ud.prevObjects);
+    await saveNow(ud.prevObjects);
+    schedulePreviewSave();
+    if (ud.deletedAssetIds.length) {
+      for (const assetId of ud.deletedAssetIds) {
+        await fetch(`/api/assets/${assetId}/restore`, { method: "POST" }).catch(() => {});
+      }
+    }
+  };
+  const runUndoDeleteRef = useRef<(() => Promise<void>) | null>(null);
+  runUndoDeleteRef.current = runUndoDelete;
 
   const focusZoomInOnSprite = (sp: PIXI.Sprite) => {
     const app = appRef.current;
@@ -1224,64 +1264,54 @@ export function PixiWorkspace(props: {
       const ids = selectedIdsRef.current;
       if (!ids || ids.length === 0) return;
 
-      // Confirmation: only prompt when deleting images from the board.
       const currentObjects = objectsRef.current ?? [];
+      const prevObjectsSnapshot = [...currentObjects];
+      const prevAssetsSnapshot = [...(assetsRef.current ?? [])];
       const removeSet = new Set(ids);
-      const selectedImageObjects = currentObjects.filter((o) => removeSet.has(o.id) && o.type === "image");
-      if (selectedImageObjects.length > 0) {
-        const removedAssetIds = new Set<string>();
-        for (const o of selectedImageObjects) {
-          if (o.asset_id) removedAssetIds.add(o.asset_id);
-        }
-        const remainingAssetIds = new Set<string>();
-        for (const o of currentObjects) {
-          if (removeSet.has(o.id)) continue;
-          if (o.type !== "image") continue;
-          if (!o.asset_id) continue;
-          remainingAssetIds.add(o.asset_id);
-        }
-        const assetsThatWouldBeDeleted = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
-
-        const msg =
-          assetsThatWouldBeDeleted.length > 0
-            ? `Delete ${selectedImageObjects.length} image(s) from the board?\n\nThis will also permanently delete ${assetsThatWouldBeDeleted.length} asset(s) from the project because nothing else is using them.`
-            : `Delete ${selectedImageObjects.length} image(s) from the board?`;
-        if (!window.confirm(msg)) return;
-      }
 
       setSelectedIds([]);
-      let nextObjects: CanvasObjectRow[] | null = null;
-      let assetsToDelete: string[] = [];
-      setObjects((prev) => {
-        const remove = new Set(ids);
-        const next = prev.filter((o) => !remove.has(o.id));
+      const nextObjects = currentObjects.filter((o) => !removeSet.has(o.id));
 
-        // Determine which underlying assets can be deleted safely:
-        // only delete an asset if ALL objects referencing it are being removed.
-        const removedAssetIds = new Set<string>();
-        for (const o of prev) {
-          if (!remove.has(o.id)) continue;
-          if (o.type !== "image") continue;
-          if (!o.asset_id) continue;
-          removedAssetIds.add(o.asset_id);
-        }
+      // Determine which underlying assets can be deleted safely:
+      // only delete an asset if ALL objects referencing it are being removed.
+      const removedAssetIds = new Set<string>();
+      for (const o of currentObjects) {
+        if (!removeSet.has(o.id)) continue;
+        if (o.type !== "image") continue;
+        if (!o.asset_id) continue;
+        removedAssetIds.add(o.asset_id);
+      }
 
-        const remainingAssetIds = new Set<string>();
-        for (const o of next) {
-          if (o.type !== "image") continue;
-          if (!o.asset_id) continue;
-          remainingAssetIds.add(o.asset_id);
-        }
+      const remainingAssetIds = new Set<string>();
+      for (const o of nextObjects) {
+        if (o.type !== "image") continue;
+        if (!o.asset_id) continue;
+        remainingAssetIds.add(o.asset_id);
+      }
 
-        assetsToDelete = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
-        nextObjects = next;
+      const assetsToDelete = [...removedAssetIds].filter((id) => !remainingAssetIds.has(id));
 
-        scheduleEmitObjectsChange(next);
-        return next;
+      setObjects(nextObjects);
+      scheduleEmitObjectsChange(nextObjects);
+
+      if (assetsToDelete.length) {
+        setAssets((prev) => prev.filter((a) => !assetsToDelete.includes(a.id)));
+      }
+
+      setDeleteUndoStack((prev) => {
+        const next = [
+          ...prev,
+          {
+            deletedCount: ids.length,
+            deletedAssetIds: assetsToDelete,
+            prevObjects: prevObjectsSnapshot,
+            prevAssets: prevAssetsSnapshot,
+          },
+        ];
+        return next.length > UNDO_DELETE_MAX ? next.slice(next.length - UNDO_DELETE_MAX) : next;
       });
 
       window.setTimeout(async () => {
-        if (!nextObjects) return;
         await saveNow(nextObjects);
         schedulePreviewSave();
 
@@ -1289,7 +1319,6 @@ export function PixiWorkspace(props: {
           for (const assetId of assetsToDelete) {
             await fetch(`/api/assets/${assetId}`, { method: "DELETE" }).catch(() => {});
           }
-          setAssets((prev) => prev.filter((a) => !assetsToDelete.includes(a.id)));
         }
       }, 0);
     };
@@ -1438,6 +1467,17 @@ export function PixiWorkspace(props: {
       }
 
       if (isTyping) return;
+
+      // Undo last delete (canvas delete buffer only).
+      // IMPORTANT: don't steal Cmd/Ctrl+Z from text inputs; we only handle it when not typing.
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && !e.altKey && (e.key === "z" || e.key === "Z")) {
+        if (deleteUndoStackRef.current.length) {
+          e.preventDefault();
+          void runUndoDeleteRef.current?.();
+        }
+        return;
+      }
 
       // Arrow-key navigation between objects (requires exactly 1 selected).
       if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {

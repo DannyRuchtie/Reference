@@ -469,7 +469,11 @@ fn main() {
       match id {
         "settings" => {
           // Navigate within the Next.js app.
-          let _ = event.window().eval("window.location.href = '/settings';");
+          // If we're currently on a project route, preserve projectId so Settings can enable project-scoped actions
+          // like "Retry failed AI".
+          let _ = event.window().eval(
+            "(function(){const m=window.location.pathname.match(/^\\/projects\\/([^\\/]+)/);const pid=m&&m[1];window.location.href=pid?('/settings?projectId='+encodeURIComponent(pid)):'/settings';})()"
+          );
         }
         "project_settings" => {
           // Navigate with a fade, and include projectId when we're currently in /projects/:id.

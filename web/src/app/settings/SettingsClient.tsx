@@ -33,6 +33,8 @@ export default function SettingsClient() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retryMsg, setRetryMsg] = useState<string | null>(null);
+  const [retryBusy, setRetryBusy] = useState(false);
 
   const [settings, setSettings] = useState<Settings>({
     storage: { mode: "local" },
@@ -118,6 +120,38 @@ export default function SettingsClient() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  const saveAll = async () => {
+    setSaving(true);
+    setSaved(false);
+    setError(null);
+    try {
+      const payload: Settings = {
+        storage: {
+          mode: settings.storage.mode,
+          icloudPath:
+            settings.storage.mode === "icloud"
+              ? (settings.storage.icloudPath?.trim() || undefined)
+              : undefined,
+        },
+        ai: {
+          provider: settings.ai.provider,
+          endpoint: settings.ai.endpoint?.trim() || undefined,
+        },
+      };
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Failed to save settings");
+      setSaved(true);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 overflow-auto text-zinc-50">
@@ -226,37 +260,7 @@ export default function SettingsClient() {
           <div className="mt-4 flex items-center gap-3">
             <button
               disabled={!loaded || saving}
-              onClick={async () => {
-                setSaving(true);
-                setSaved(false);
-                setError(null);
-                try {
-                  const payload: Settings = {
-                    storage: {
-                      mode: settings.storage.mode,
-                      icloudPath:
-                        settings.storage.mode === "icloud"
-                          ? (settings.storage.icloudPath?.trim() || undefined)
-                          : undefined,
-                    },
-                    ai: {
-                      provider: settings.ai.provider,
-                      endpoint: settings.ai.endpoint?.trim() || undefined,
-                    },
-                  };
-                  const res = await fetch("/api/settings", {
-                    method: "PUT",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload),
-                  });
-                  if (!res.ok) throw new Error("Failed to save settings");
-                  setSaved(true);
-                } catch (e) {
-                  setError((e as Error).message);
-                } finally {
-                  setSaving(false);
-                }
-              }}
+              onClick={saveAll}
               className="rounded-lg bg-zinc-50 px-4 py-2 text-sm font-medium text-zinc-950 disabled:opacity-60"
             >
               {saving ? "Saving…" : "Save"}
@@ -295,30 +299,45 @@ export default function SettingsClient() {
             </div>
 
             <div className="flex items-center gap-3">
+              <button
+                disabled={!loaded || saving}
+                onClick={saveAll}
+                className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save endpoint"}
+              </button>
             <button
               disabled={!projectId}
               onClick={async () => {
                 if (!projectId) return;
                 setError(null);
+                  setRetryMsg(null);
+                  setRetryBusy(true);
                 try {
                   const res = await fetch(`/api/projects/${projectId}/ai/retry`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({}),
                   });
-                  if (!res.ok) throw new Error("Retry failed");
+                    if (!res.ok) throw new Error("Retry failed");
+                    const data = (await res.json().catch(() => null)) as { changes?: number } | null;
+                    const changes = data?.changes ?? 0;
+                    setRetryMsg(changes > 0 ? `Retried ${changes} asset(s).` : "No failed assets to retry.");
                 } catch (e) {
                   setError((e as Error).message);
+                  } finally {
+                    setRetryBusy(false);
                 }
               }}
               className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
             >
-              Retry failed AI (this project)
+                {retryBusy ? "Retrying…" : "Retry failed AI (this project)"}
             </button>
             {!projectId ? (
               <div className="text-xs text-zinc-600">Open Settings from inside a project to enable this.</div>
             ) : null}
             </div>
+            {retryMsg ? <div className="text-xs text-zinc-500">{retryMsg}</div> : null}
           </div>
         </div>
       </div>

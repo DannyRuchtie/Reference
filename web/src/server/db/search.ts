@@ -76,7 +76,7 @@ export function searchAssets(args: {
           ai.updated_at AS ai_updated_at
         FROM assets a
         LEFT JOIN asset_ai ai ON ai.asset_id = a.id
-        WHERE a.project_id = ?
+        WHERE a.project_id = ? AND a.deleted_at IS NULL
         ORDER BY a.created_at DESC
         LIMIT ?`
       )
@@ -95,7 +95,7 @@ export function searchAssets(args: {
       FROM asset_search s
       JOIN assets a ON a.id = s.asset_id
       LEFT JOIN asset_ai ai ON ai.asset_id = a.id
-      WHERE s.project_id = ? AND asset_search MATCH ?
+      WHERE s.project_id = ? AND a.deleted_at IS NULL AND asset_search MATCH ?
       ORDER BY rank
       LIMIT ?`
     )
@@ -151,7 +151,7 @@ function getEmbeddingsForProject(projectId: string) {
       `SELECT e.asset_id AS asset_id, e.model AS model, e.dim AS dim, e.embedding AS embedding
        FROM asset_embeddings e
        JOIN assets a ON a.id = e.asset_id
-       WHERE a.project_id = ? AND e.embedding IS NOT NULL`
+       WHERE a.project_id = ? AND a.deleted_at IS NULL AND e.embedding IS NOT NULL`
     )
     .all(projectId) as Array<{ asset_id: string; model: string; dim: number; embedding: Buffer }>;
 }
@@ -172,7 +172,7 @@ function getAssetsByIdsPreserveOrder(assetIds: string[]): AssetWithAi[] {
         ai.updated_at AS ai_updated_at
       FROM assets a
       LEFT JOIN asset_ai ai ON ai.asset_id = a.id
-      WHERE a.id IN (${placeholders})
+      WHERE a.deleted_at IS NULL AND a.id IN (${placeholders})
       ORDER BY CASE a.id ${orderCase} ELSE 999999 END`
     )
     .all(...assetIds, ...assetIds.flatMap((id, idx) => [id, idx])) as AssetWithAi[];
