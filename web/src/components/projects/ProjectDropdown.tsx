@@ -267,27 +267,6 @@ export function ProjectDropdown(props: {
                     {isMac ? "⌘K" : "Ctrl+K"}
                   </span>
                 </button>
-                <button
-                  onClick={() => {
-                    setOpen(false);
-                    setActionsFor(null);
-                    dispatchRouteFadeStart();
-                    window.setTimeout(() => {
-                      router.push(`/settings?projectId=${encodeURIComponent(props.currentProjectId)}`);
-                    }, ROUTE_FADE_MS);
-                  }}
-                  className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
-                >
-                  <span>Settings</span>
-                  <span className="inline-flex items-center gap-1">
-                    <span className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] text-zinc-400">
-                      {isMac ? "⌘." : "Ctrl+."}
-                    </span>
-                    <span className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] text-zinc-400">
-                      .
-                    </span>
-                  </span>
-                </button>
               </div>
             </div>
           </>

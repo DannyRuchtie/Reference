@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetWithAi } from "@/server/db/types";
+import { THEME_ACCENT_RGB } from "@/lib/theme";
 
 type Segment = {
   tag: string;
@@ -383,7 +384,7 @@ export function AssetLightbox(props: {
                       height: imageFit.drawH,
                       opacity: 0.22,
                       mixBlendMode: "screen",
-                      filter: "drop-shadow(0px 0px 10px rgba(124, 58, 237, 0.65))",
+                      filter: `drop-shadow(0px 0px 10px rgba(${THEME_ACCENT_RGB}, 0.65))`,
                     }}
                   />
                 ) : null}
@@ -411,8 +412,11 @@ export function AssetLightbox(props: {
                         top: imageFit.offsetY + yPx,
                         width: wPx,
                         height: hPx,
+                        borderColor: `rgba(${THEME_ACCENT_RGB}, 0.90)`,
+                        backgroundColor: `rgba(${THEME_ACCENT_RGB}, 0.10)`,
+                        boxShadow: `0 0 18px rgba(${THEME_ACCENT_RGB}, 0.55)`,
                       }}
-                      className="rounded-sm border-2 border-violet-400/90 bg-violet-500/10 shadow-[0_0_18px_rgba(124,58,237,0.55)]"
+                      className="rounded-sm border-2"
                     />
                   );
                 })}
@@ -433,7 +437,18 @@ export function AssetLightbox(props: {
             </div>
             <button
               onClick={() => requestClose()}
-              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-black/30 text-zinc-200 hover:bg-black/50 focus:outline-none focus:ring-2 focus:ring-violet-400/50"
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-black/30 text-zinc-200 hover:bg-black/50 focus:outline-none focus:ring-2"
+              style={{
+                // Match the accent color used by selection outlines.
+                ["--md-accent-ring" as any]: `rgba(${THEME_ACCENT_RGB}, 0.50)`,
+              }}
+              // Tailwind can't easily express dynamic rgb; use CSS var.
+              onFocus={(e) => {
+                (e.currentTarget as HTMLElement).style.boxShadow = `0 0 0 2px var(--md-accent-ring)`;
+              }}
+              onBlur={(e) => {
+                (e.currentTarget as HTMLElement).style.boxShadow = "";
+              }}
               aria-label="Close"
             >
               <span aria-hidden="true" className="text-lg leading-none">
@@ -484,8 +499,16 @@ export function AssetLightbox(props: {
                             className={
                               "rounded-full border px-2 py-1 text-xs " +
                               (selected
-                                ? "border-violet-400/60 bg-violet-500/15 text-zinc-100"
+                                ? "text-zinc-100"
                                 : "border-white/10 bg-black/20 text-zinc-200 hover:bg-black/30")
+                            }
+                            style={
+                              selected
+                                ? {
+                                    borderColor: `rgba(${THEME_ACCENT_RGB}, 0.60)`,
+                                    backgroundColor: `rgba(${THEME_ACCENT_RGB}, 0.15)`,
+                                  }
+                                : undefined
                             }
                             title={s.updatedAt}
                           >

@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Command } from "cmdk";
 
 import type { AssetWithAi, CanvasObjectRow } from "@/server/db/types";
+import { ROUTE_FADE_MS, dispatchRouteFadeStart } from "@/lib/routeFade";
 
 export function AssetCommandPalette(props: {
   projectId: string;
@@ -17,6 +19,7 @@ export function AssetCommandPalette(props: {
     bboxJson: string | null;
   }) => void;
 }) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<AssetWithAi[]>([]);
@@ -142,6 +145,27 @@ export function AssetCommandPalette(props: {
             <Command.Empty className="p-3 text-sm text-zinc-500">
               No results.
             </Command.Empty>
+
+            <Command.Group heading="Commands" className="mb-2">
+              <Command.Item
+                value="settings preferences"
+                onSelect={() => {
+                  setOpen(false);
+                  setSearch("");
+                  dispatchRouteFadeStart();
+                  window.setTimeout(() => {
+                    router.push(`/settings?projectId=${encodeURIComponent(props.projectId)}`);
+                  }, ROUTE_FADE_MS);
+                }}
+                className="flex items-center justify-between rounded-lg px-3 py-2 text-sm text-zinc-200 aria-selected:bg-zinc-900"
+              >
+                <div className="min-w-0">
+                  <div className="truncate">Settings</div>
+                  <div className="truncate text-xs text-zinc-500">Storage, AI, desktop options</div>
+                </div>
+                <div className="shrink-0 text-[11px] text-zinc-500">.</div>
+              </Command.Item>
+            </Command.Group>
 
             {items.map((a) => {
               const onCanvas = objectIdByAssetId.get(a.id);

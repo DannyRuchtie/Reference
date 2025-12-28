@@ -25,7 +25,7 @@ type RippleUniformGroup = PIXI.UniformGroup & { uniforms: RippleUniformValues };
 
 // Theme color used for the *viewport region* indicator inside the minimap.
 // Keep this aligned with the app's visual language (matches the existing selection blue).
-const THEME_ACCENT = 0x60a5fa; // blue-400
+import { THEME_ACCENT } from "@/lib/theme";
 const IMAGE_CORNER_RADIUS = 22; // in texture pixels at scale=1 (scales with zoom)
 
 const WORKSPACE_BG_HEX = 0x0a0a0a; // slightly-off black
@@ -2367,7 +2367,7 @@ void main()
         selectionBox.rect(-baseW / 2, -baseH / 2, baseW, baseH);
         selectionBox.stroke({
           width: strokePx / (safeSpriteScale * safeWorldZoom),
-          color: 0x60a5fa,
+          color: THEME_ACCENT,
           alpha: 0.9,
         });
 
@@ -2424,7 +2424,7 @@ void main()
           g.lineTo(p3.x, p3.y);
           g.lineTo(p4.x, p4.y);
           g.lineTo(p1.x, p1.y);
-          g.stroke({ width: glowW, color: 0x60a5fa, alpha: 0.22 });
+          g.stroke({ width: glowW, color: THEME_ACCENT, alpha: 0.22 });
 
           // Main stroke
           g.moveTo(p1.x, p1.y);
@@ -2432,7 +2432,7 @@ void main()
           g.lineTo(p3.x, p3.y);
           g.lineTo(p4.x, p4.y);
           g.lineTo(p1.x, p1.y);
-          g.stroke({ width: strokeW, color: 0x60a5fa, alpha: 0.98 });
+          g.stroke({ width: strokeW, color: THEME_ACCENT, alpha: 0.98 });
         }
       };
 
