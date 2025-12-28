@@ -20,7 +20,6 @@ type RippleUniformValues = {
   uShapeRotation: number;
   uDuration: number;
 };
-
 type RippleUniformGroup = PIXI.UniformGroup & { uniforms: RippleUniformValues };
 
 // Theme color used for the *viewport region* indicator inside the minimap.
@@ -297,16 +296,13 @@ export function PixiWorkspace(props: {
     active: boolean;
     timeSec: number;
   } | null>(null);
-  const lastRippleCenter01Ref = useRef<PIXI.Point>(new PIXI.Point(0.5, 0.5));
   // Drop ripple should only start once the dropped image is actually present on-canvas.
-  // We store the renderer-space drop point + the newly created object id, then trigger
-  // the ripple the moment that object's texture becomes available.
+  // We store the newly created object id(s), then trigger the ripple the moment the primary
+  // object's texture becomes available (so the card is actually visible).
   // Note: drops can overlap (async upload). We track a monotonically increasing seq so the
   // latest drop wins and older responses can't override the pending ripple target.
   const dropSeqRef = useRef(0);
-  const pendingDropRippleRef = useRef<null | { objectId: string; rx: number; ry: number; fired: boolean }>(
-    null
-  );
+  const pendingDropRippleRef = useRef<null | { objectIds: string[]; fired: boolean }>(null);
   const previewRef = useRef<{
     rt: PIXI.RenderTexture;
     root: PIXI.Container;
@@ -549,28 +545,16 @@ export function PixiWorkspace(props: {
     const ripple = rippleRef.current;
     if (!app || !worldRoot || !ripple) return;
 
-    // IMPORTANT: uCenter is normalized within the filterArea (screen-space), not necessarily the full renderer.
-    // Use the actual filterArea bounds to avoid off-center ripples on resize / non-zero filterArea origins.
-    const fa = worldRoot.filterArea ?? app.screen;
-    const w = Math.max(1, Number(fa?.width ?? app.renderer.width));
-    const h = Math.max(1, Number(fa?.height ?? app.renderer.height));
-    const ox = Number(fa?.x ?? 0);
-    const oy = Number(fa?.y ?? 0);
-    const x01 = clamp((rx - ox) / w, 0, 1);
-    const y01 = clamp((ry - oy) / h, 0, 1);
-
-    lastRippleCenter01Ref.current.set(x01, y01);
+    // Always originate from screen center (ignore rx/ry).
+    const x01 = 0.5;
+    const y01 = 0.5;
 
     ripple.active = true;
     ripple.timeSec = 0;
     ripple.uniforms.uniforms.uTime = 0;
     ripple.uniforms.uniforms.uCenter.set(x01, y01);
-    ripple.uniforms.uniforms.uAspect = w / h;
-    ripple.uniforms.uniforms.uShapeAspect = clamp(
-      Number(opts?.shapeAspect ?? 1) || 1,
-      0.05,
-      20
-    );
+    ripple.uniforms.uniforms.uAspect = app.renderer.width / Math.max(1, app.renderer.height);
+    ripple.uniforms.uniforms.uShapeAspect = clamp(Number(opts?.shapeAspect ?? 1) || 1, 0.05, 20);
     ripple.uniforms.uniforms.uShapeRotation = Number(opts?.shapeRotation ?? 0) || 0;
 
     if (!worldRoot.filters || worldRoot.filters.length === 0) {
@@ -580,52 +564,34 @@ export function PixiWorkspace(props: {
     }
   };
 
-  const rippleOriginSpriteCenter = (sp: PIXI.Sprite): { rx: number; ry: number } => {
-    // Use the sprite's *screen-space* bounds so rotation is handled naturally.
-    // Start from the center of the "card" for a "card hits water" ripple feel.
-    const b = sp.getBounds();
-    return { rx: b.x + b.width / 2, ry: b.y + b.height / 2 };
-  };
-
   const maybeTriggerPendingDropRipple = (objectId: string, tex: PIXI.Texture | null | undefined) => {
     const pending = pendingDropRippleRef.current;
     if (!pending || pending.fired) return;
-    if (pending.objectId !== objectId) return;
+    const primaryId = pending.objectIds?.[0] ?? null;
+    if (primaryId !== objectId) return;
     const w = Number(tex?.orig?.width ?? 0);
     const h = Number(tex?.orig?.height ?? 0);
     if (!(w > 0 && h > 0)) return;
     pending.fired = true;
-    const sp = spritesByObjectIdRef.current.get(objectId);
-    const sx = Math.abs(sp?.scale?.x ?? 1) || 1;
-    const sy = Math.abs(sp?.scale?.y ?? 1) || 1;
-    const shapeAspect = (w * sx) / Math.max(1e-6, h * sy);
-    const shapeRotation = Number(sp?.rotation ?? 0) || 0;
-    if (sp) {
-      // Exempt the newly dropped card from the ripple so the effect reads as "water behind it".
-      // We do this by temporarily reparenting the sprite (and its shadow) into an unfiltered overlay layer.
-      const world = worldRef.current;
-      const worldOverlay = worldOverlayRef.current;
-      if (world && worldOverlay) {
-        worldOverlay.position.set(world.position.x, world.position.y);
-        worldOverlay.scale.set(world.scale.x, world.scale.y);
-        worldOverlay.rotation = world.rotation ?? 0;
-      }
-      const overlayLayer = overlaySpritesLayerRef.current;
-      if (overlayLayer) {
-        const sh = shadowsByObjectIdRef.current.get(objectId);
+    const overlayLayer = overlaySpritesLayerRef.current;
+    if (overlayLayer) {
+      // Lift all newly dropped items above the ripple overlay (so ripple is underneath them).
+      for (const id of pending.objectIds) {
+        const sp = spritesByObjectIdRef.current.get(id);
+        if (!sp) continue;
+        const sh = shadowsByObjectIdRef.current.get(id);
         if (sh) overlayLayer.addChild(sh);
         overlayLayer.addChild(sp);
-        rippleExemptObjectIdsRef.current.add(objectId);
+        rippleExemptObjectIdsRef.current.add(id);
       }
-
-      const { rx, ry } = rippleOriginSpriteCenter(sp);
-      triggerRippleAtRendererPoint(rx, ry, { shapeAspect, shapeRotation });
-      // Clear so subsequent drops can set a fresh pending ripple target.
-      pendingDropRippleRef.current = null;
-    } else {
-      triggerRippleAtRendererPoint(pending.rx, pending.ry, { shapeAspect, shapeRotation });
-      pendingDropRippleRef.current = null;
     }
+
+    // Always originate from screen center.
+    const app = appRef.current;
+    const cx = (app?.renderer?.width ?? 0) / 2;
+    const cy = (app?.renderer?.height ?? 0) / 2;
+    triggerRippleAtRendererPoint(cx, cy, {});
+    pendingDropRippleRef.current = null;
   };
 
   const objectsRef = useRef<CanvasObjectRow[]>(initialObjects);
@@ -1697,7 +1663,7 @@ export function PixiWorkspace(props: {
       // Filtered layer (ripple affects everything in here)
       const worldRoot = new PIXI.Container();
       worldRootRef.current = worldRoot;
-      // Constrain filter work to the visible viewport (renderer/screen space).
+      // Constrain any potential filter work to the visible viewport.
       worldRoot.filterArea = app.screen;
       stageRoot.addChild(worldRoot);
 
@@ -1726,9 +1692,10 @@ export function PixiWorkspace(props: {
       worldOverlay.addChild(overlaySpritesLayer);
 
       // WebGL ripple filter (triggered on drop + "r" shortcut).
-      // Note: We only provide the WebGL program. If Pixi ever runs via WebGPU here, this effect will be skipped.
+      // We compute ripple math in normalized UV (0..1) to avoid browser/DPR differences.
       const rippleVertex = `in vec2 aPosition;
 out vec2 vTextureCoord;
+out vec2 vUvMax;
 
 uniform vec4 uInputSize;
 uniform vec4 uOutputFrame;
@@ -1753,16 +1720,18 @@ void main(void)
 {
     gl_Position = filterVertexPosition();
     vTextureCoord = filterTextureCoord();
+    vUvMax = uOutputFrame.zw * uInputSize.zw;
 }`;
 
       const rippleFragment = `
 in vec2 vTextureCoord;
+in vec2 vUvMax;
 out vec4 finalColor;
 
 uniform sampler2D uTexture;
 
 uniform float uTime;
-uniform vec2 uCenter;     // 0..1 within filterArea (screen-space)
+uniform vec2 uCenter;     // 0..1 within viewport
 uniform float uAmplitude; // UV offset scale
 uniform float uFrequency; // wave frequency
 uniform float uSpeed;     // ring expansion speed (in UV/sec)
@@ -1776,41 +1745,29 @@ uniform float uDuration;  // seconds
 float heightAt(float dist, float radius, float w, float timeFade, float distFade)
 {
     float x = dist - radius;
-
-    // Front band: a smooth "impact ring".
     float frontBand = exp(-(x * x) / (w * w));
-
-    // Behind band: trailing ripples that decay behind the front.
     float behindBand = step(x, 0.0) * exp(x / (w * 2.0));
-
-    // Ahead of the front, fade out quickly.
     float aheadFade = smoothstep(w * 3.0, 0.0, x);
-
     float band = (0.25 * frontBand + 0.75 * behindBand) * aheadFade;
-
-    // Two harmonics reads as "watery" vs a single sine.
     float phase = x * uFrequency;
     float wave = sin(phase) + 0.35 * sin(phase * 2.15 + 1.3);
-
-    // Global gain (keeps the effect subtle even with higher frequency content).
     return wave * band * timeFade * distFade * 0.35;
 }
 
 void main()
 {
-    vec2 uv = vTextureCoord;
-    vec2 pUv = uv - uCenter;
-    // Convert to screen-corrected space (so circles are circles on screen).
+    vec2 uvMax = max(vUvMax, vec2(0.000001));
+    vec2 uv01 = vTextureCoord / uvMax;
+    vec2 pUv = uv01 - uCenter;
+
     vec2 pScreen = pUv;
     pScreen.x *= uAspect;
 
-    // Rotate into the image-aligned frame.
     float cs = cos(uShapeRotation);
     float sn = sin(uShapeRotation);
     mat2 rot = mat2(cs, -sn, sn, cs);
     vec2 pr = rot * pScreen;
 
-    // Elliptical metric based on the image aspect ratio (w/h).
     float sAspect = max(uShapeAspect, 0.0001);
     vec2 pm = vec2(pr.x / sAspect, pr.y);
     float dist = length(pm);
@@ -1821,10 +1778,8 @@ void main()
     float radius = uTime * uSpeed;
     float w = max(uWidth, 0.0005);
 
-    // Radial direction in UV space for an ellipse:
-    // - compute direction in metric space (pm), then map back to UV.
     vec2 dm = dist > 0.00001 ? (pm / dist) : vec2(0.0, 0.0);
-    vec2 dr = vec2(dm.x * sAspect, dm.y); // undo metric scaling (back to rotated screen space)
+    vec2 dr = vec2(dm.x * sAspect, dm.y);
     mat2 rotInv = mat2(cs, sn, -sn, cs);
     vec2 dScreen = rotInv * dr;
     vec2 dir = dScreen;
@@ -1832,7 +1787,6 @@ void main()
     float dirLen = length(dir);
     dir = dirLen > 0.00001 ? (dir / dirLen) : vec2(0.0, 0.0);
 
-    // Finite-difference slope -> "refraction normal" feel.
     float eps = 0.004;
     float h0 = heightAt(dist, radius, w, timeFade, distFade);
     float h1 = heightAt(dist + eps, radius, w, timeFade, distFade);
@@ -1841,12 +1795,12 @@ void main()
     float dhClamped = clamp(dh, -1.0, 1.0);
     float hClamped = clamp(h0, -1.0, 1.0);
 
-    // Refraction: use slope + a tiny rotational component.
     vec2 perp = vec2(-dir.y, dir.x);
     vec2 disp = (dir * dhClamped + perp * (hClamped * 0.08)) * uAmplitude;
 
-    vec2 uv2 = uv + disp;
-    uv2 = clamp(uv2, vec2(0.0), vec2(1.0));
+    vec2 uv2_01 = uv01 + disp;
+    uv2_01 = clamp(uv2_01, vec2(0.0), vec2(1.0));
+    vec2 uv2 = uv2_01 * uvMax;
 
     finalColor = texture(uTexture, uv2);
 }`;
@@ -1854,7 +1808,6 @@ void main()
       const rippleUniforms = new PIXI.UniformGroup({
         uTime: { value: 0, type: "f32" },
         uCenter: { value: new PIXI.Point(0.5, 0.5), type: "vec2<f32>" },
-        // Slower + smoother: softer refraction, lower-frequency waves, wider ring band.
         uAmplitude: { value: 0.0026, type: "f32" },
         uFrequency: { value: 28.0, type: "f32" },
         uSpeed: { value: 0.36, type: "f32" },
@@ -2832,14 +2785,13 @@ void main()
         if (ripple && ripple.active) {
           ripple.timeSec += (ticker.deltaMS ?? 16.6667) / 1000;
           ripple.uniforms.uniforms.uTime = ripple.timeSec;
-          ripple.uniforms.uniforms.uAspect =
-            app.renderer.width / Math.max(1, app.renderer.height);
+          ripple.uniforms.uniforms.uAspect = app.renderer.width / Math.max(1, app.renderer.height);
 
           const duration = Number(ripple.uniforms.uniforms.uDuration) || 1.0;
           if (ripple.timeSec >= duration) {
             ripple.active = false;
             ripple.timeSec = 0;
-            // Remove the filter when inactive to preserve existing performance.
+            // Remove the filter when inactive to preserve performance.
             if (worldRoot.filters && worldRoot.filters.includes(ripple.filter)) {
               worldRoot.filters = worldRoot.filters.filter((f) => f !== ripple.filter);
             }
@@ -2847,7 +2799,7 @@ void main()
               worldRoot.filters = [];
             }
 
-            // Restore any sprites we temporarily exempted from the ripple (drop card).
+            // Restore any sprites we temporarily exempted from the ripple (drop cards).
             const ids = rippleExemptObjectIdsRef.current;
             const mainLayer = worldSpritesLayerRef.current;
             if (mainLayer && ids.size) {
@@ -3247,17 +3199,17 @@ void main()
     const files = Array.from(e.dataTransfer.files || []);
     if (files.length === 0) return;
 
-    const rect = app.canvas.getBoundingClientRect();
-    const rx = ((e.clientX - rect.left) * app.renderer.width) / rect.width;
-    const ry = ((e.clientY - rect.top) * app.renderer.height) / rect.height;
+    // New behavior: always drop into the center of the viewport.
+    const rx = app.renderer.width / 2;
+    const ry = app.renderer.height / 2;
     // Place dropped items in screen-space so stacking looks consistent regardless of zoom level.
     const STACK_STEP_PX = 28; // slight overlap while still revealing edges
     const STACK_GROUP_SIZE = 12; // prevent huge diagonal drift when dropping many files
     const STACK_GROUP_SHIFT_PX = 40; // shift each group so later items are still visible near the drop point
-    const stepRx = (STACK_STEP_PX * app.renderer.width) / rect.width;
-    const stepRy = (STACK_STEP_PX * app.renderer.height) / rect.height;
-    const groupShiftRx = (STACK_GROUP_SHIFT_PX * app.renderer.width) / rect.width;
-    const groupShiftRy = (STACK_GROUP_SHIFT_PX * app.renderer.height) / rect.height;
+    const stepRx = STACK_STEP_PX;
+    const stepRy = STACK_STEP_PX;
+    const groupShiftRx = STACK_GROUP_SHIFT_PX;
+    const groupShiftRy = STACK_GROUP_SHIFT_PX;
 
     const form = new FormData();
     for (const f of files) form.append("files", f, f.name);
@@ -3297,7 +3249,7 @@ void main()
     if (newIds.length > 0) {
       // Only keep the latest in-flight drop as the pending ripple target.
       if (dropSeq === dropSeqRef.current) {
-        pendingDropRippleRef.current = { objectId: newIds[0], rx, ry, fired: false };
+        pendingDropRippleRef.current = { objectIds: newIds, fired: false };
       }
     }
     const nowIso = new Date().toISOString();
