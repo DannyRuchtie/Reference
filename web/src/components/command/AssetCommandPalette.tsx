@@ -1,11 +1,78 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Command } from "cmdk";
 
 import type { AssetWithAi, CanvasObjectRow } from "@/server/db/types";
-import { ROUTE_FADE_MS, dispatchRouteFadeStart } from "@/lib/routeFade";
+
+function humanizeFilename(name: string) {
+  const raw = (name || "").trim();
+  if (!raw) return "";
+
+  // Remove extension
+  const dot = raw.lastIndexOf(".");
+  let base = dot > 0 ? raw.slice(0, dot) : raw;
+
+  // If it's an auto-generated "title--hash" style, keep only the title part.
+  const doubleDash = base.indexOf("--");
+  if (doubleDash > 0) base = base.slice(0, doubleDash);
+
+  // Remove trailing "-<hex>" slug (common content-addressed suffixes).
+  base = base.replace(/-[0-9a-fA-F]{8,}$/g, "");
+
+  // Turn separators into spaces.
+  base = base.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+
+  // Basic sentence casing.
+  if (!base) return raw;
+  return base.charAt(0).toUpperCase() + base.slice(1);
+}
+
+function shortTitleFromCaption(caption: string) {
+  let s = (caption || "").trim();
+  if (!s) return "";
+
+  // Strip common verbose prefixes.
+  s = s.replace(/^(the|this)\s+(image|photo|picture|video)\s+(depicts|shows|features|captures)\s+/i, "");
+  s = s.replace(/^(an?|this)\s+(image|photo|picture|video)\s+(of|showing)\s+/i, "");
+
+  // Prefer first clause.
+  const cutIdx = (() => {
+    const candidates = [
+      s.indexOf("."),
+      s.indexOf(";"),
+      s.indexOf(":"),
+      s.indexOf(" — "),
+      s.indexOf(" – "),
+      s.indexOf(" - "),
+      s.indexOf(", while "),
+      s.indexOf(", with "),
+      s.indexOf(", featuring "),
+    ].filter((i) => i >= 0);
+    if (!candidates.length) return -1;
+    return Math.min(...candidates);
+  })();
+  if (cutIdx > 0) s = s.slice(0, cutIdx);
+
+  // Collapse whitespace.
+  s = s.replace(/\s+/g, " ").trim();
+
+  // Cap words/chars so it reads like a title.
+  const words = s.split(" ").filter(Boolean);
+  const MAX_WORDS = 8;
+  const MAX_CHARS = 48;
+  let out = words.slice(0, MAX_WORDS).join(" ");
+  if (out.length > MAX_CHARS) out = out.slice(0, MAX_CHARS).trimEnd();
+  if (out !== s) out = out.replace(/[,\-–—:;]+$/g, "").trimEnd() + "…";
+  return out;
+}
+
+function displayTitle(a: AssetWithAi) {
+  const caption = (a.ai_status === "done" ? (a.ai_caption ?? "") : "").trim();
+  if (caption) return shortTitleFromCaption(caption) || caption;
+  const h = humanizeFilename(a.original_name);
+  return h || a.original_name || "Untitled";
+}
 
 export function AssetCommandPalette(props: {
   projectId: string;
@@ -19,7 +86,6 @@ export function AssetCommandPalette(props: {
     bboxJson: string | null;
   }) => void;
 }) {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<AssetWithAi[]>([]);
@@ -146,31 +212,10 @@ export function AssetCommandPalette(props: {
               No results.
             </Command.Empty>
 
-            <Command.Group heading="Commands" className="mb-2">
-              <Command.Item
-                value="settings preferences"
-                onSelect={() => {
-                  setOpen(false);
-                  setSearch("");
-                  dispatchRouteFadeStart();
-                  window.setTimeout(() => {
-                    router.push(`/settings?projectId=${encodeURIComponent(props.projectId)}`);
-                  }, ROUTE_FADE_MS);
-                }}
-                className="flex items-center justify-between rounded-lg px-3 py-2 text-sm text-zinc-200 aria-selected:bg-zinc-900"
-              >
-                <div className="min-w-0">
-                  <div className="truncate">Settings</div>
-                  <div className="truncate text-xs text-zinc-500">Storage, AI, desktop options</div>
-                </div>
-                <div className="shrink-0 text-[11px] text-zinc-500">.</div>
-              </Command.Item>
-            </Command.Group>
-
             {items.map((a) => {
               const onCanvas = objectIdByAssetId.get(a.id);
-              const subtitle =
-                a.ai_status === "done" ? a.ai_caption : a.ai_status ? a.ai_status : "";
+              const title = displayTitle(a);
+              const subtitle = a.ai_status && a.ai_status !== "done" ? a.ai_status : "";
               return (
                 <Command.Item
                   key={a.id}
@@ -212,7 +257,7 @@ export function AssetCommandPalette(props: {
                     ) : null}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate">{a.original_name}</div>
+                    <div className="truncate">{title}</div>
                     {subtitle ? (
                       <div className="truncate text-xs text-zinc-500">{subtitle}</div>
                     ) : null}
