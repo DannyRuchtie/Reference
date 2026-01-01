@@ -27,6 +27,9 @@ export const AppSettingsSchema = z.object({
       provider: AiProvider.default("local_station"),
       // For local_station: http://127.0.0.1:2020 or http://127.0.0.1:2021/v1
       endpoint: z.string().min(1).optional(),
+      // Hugging Face Inference Endpoint token (Bearer).
+      // This is stored locally in settings.json (desktop: Application Support).
+      hfToken: z.string().optional().nullable(),
     })
     .default({ provider: "local_station" }),
 });

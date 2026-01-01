@@ -230,6 +230,12 @@ function easeInOut01(t: number) {
   return x * x * (3 - 2 * x);
 }
 
+function easeOut01(t: number) {
+  const x = clamp(t, 0, 1);
+  // Cubic ease-out: fast start, gentle settle.
+  return 1 - Math.pow(1 - x, 3);
+}
+
 function normalizeZOrder(
   prev: CanvasObjectRow[],
   bringToFrontIds: string[]
@@ -311,6 +317,10 @@ export function PixiWorkspace(props: {
   // latest drop wins and older responses can't override the pending ripple target.
   const dropSeqRef = useRef(0);
   const pendingDropRippleRef = useRef<null | { objectIds: string[]; fired: boolean }>(null);
+  // Drop "splash" scale animation (squash -> overshoot -> settle) for newly dropped items.
+  const dropScaleMulByObjectIdRef = useRef<Map<string, number>>(new Map());
+  const dropScaleAnimStartMsByObjectIdRef = useRef<Map<string, number>>(new Map());
+  const animatingDropScaleIdsRef = useRef<Set<string>>(new Set());
   const previewRef = useRef<{
     rt: PIXI.RenderTexture;
     root: PIXI.Container;
@@ -580,6 +590,16 @@ export function PixiWorkspace(props: {
     }
   };
 
+  const startDropSplashScaleAnimation = (objectIds: string[]) => {
+    if (!objectIds || objectIds.length === 0) return;
+    const now = performance.now();
+    for (const id of objectIds) {
+      dropScaleAnimStartMsByObjectIdRef.current.set(id, now);
+      dropScaleMulByObjectIdRef.current.set(id, 1);
+      animatingDropScaleIdsRef.current.add(id);
+    }
+  };
+
   const maybeTriggerPendingDropRipple = (objectId: string, tex: PIXI.Texture | null | undefined) => {
     const pending = pendingDropRippleRef.current;
     if (!pending || pending.fired) return;
@@ -635,6 +655,9 @@ export function PixiWorkspace(props: {
       }
     }
 
+    // Scale "splash" animation (pairs nicely with the ripple).
+    startDropSplashScaleAnimation(pending.objectIds);
+
     // Always originate from screen center.
     const app = appRef.current;
     const cx = (app?.renderer?.width ?? 0) / 2;
@@ -649,8 +672,12 @@ export function PixiWorkspace(props: {
   };
 
   const objectsRef = useRef<CanvasObjectRow[]>(initialObjects);
+  const objectsByIdRef = useRef<Map<string, CanvasObjectRow>>(new Map());
   useEffect(() => {
     objectsRef.current = objects;
+    const m = new Map<string, CanvasObjectRow>();
+    for (const o of objects) m.set(o.id, o);
+    objectsByIdRef.current = m;
   }, [objects]);
 
   const minimapThemeRef = useRef<MinimapTheme>(MINIMAP_THEME);
@@ -2923,6 +2950,52 @@ void main()
           }
         }
 
+        // Drop "splash" scale animation: quick squash -> overshoot -> settle.
+        const dropAnimIds = animatingDropScaleIdsRef.current;
+        if (dropAnimIds.size) {
+          const now = performance.now();
+          const totalMs = 520;
+          const downMs = 110;
+          const downTo = 0.92;
+          const c1 = 1.35; // back overshoot amount (smaller = subtler)
+          const c3 = c1 + 1;
+          const easeOutBack01 = (t01: number) => 1 + c3 * Math.pow(t01 - 1, 3) + c1 * Math.pow(t01 - 1, 2);
+
+          for (const id of [...dropAnimIds]) {
+            const start = dropScaleAnimStartMsByObjectIdRef.current.get(id);
+            if (!start) {
+              dropAnimIds.delete(id);
+              dropScaleMulByObjectIdRef.current.delete(id);
+              continue;
+            }
+            const elapsed = now - start;
+            if (elapsed >= totalMs) {
+              dropAnimIds.delete(id);
+              dropScaleAnimStartMsByObjectIdRef.current.delete(id);
+              dropScaleMulByObjectIdRef.current.set(id, 1);
+            } else {
+              let mul = 1;
+              if (elapsed <= downMs) {
+                const t = clamp(elapsed / downMs, 0, 1);
+                mul = lerp(1, downTo, easeOut01(t));
+              } else {
+                const t = clamp((elapsed - downMs) / Math.max(1, totalMs - downMs), 0, 1);
+                mul = lerp(downTo, 1, easeOutBack01(t));
+              }
+              // Keep within sane bounds (avoid weird extreme scales if timing glitches).
+              mul = clamp(mul, 0.6, 1.25);
+              dropScaleMulByObjectIdRef.current.set(id, mul);
+            }
+
+            const o = objectsByIdRef.current.get(id);
+            const sp = spritesByObjectIdRef.current.get(id);
+            const sh = shadowsByObjectIdRef.current.get(id);
+            const mul = dropScaleMulByObjectIdRef.current.get(id) ?? 1;
+            if (o && sp) sp.scale.set(o.scale_x * mul, o.scale_y * mul);
+            if (o && sh) sh.scale.set(o.scale_x * mul, o.scale_y * mul);
+          }
+        }
+
         updateSelectionOverlay();
         updateMultiSelection();
         updateMinimap();
@@ -3092,10 +3165,11 @@ void main()
     }
 
     for (const o of objects) {
+      const scaleMul = dropScaleMulByObjectIdRef.current.get(o.id) ?? 1;
       if (spritesByObjectIdRef.current.has(o.id)) {
         const d = spritesByObjectIdRef.current.get(o.id) as PIXI.Sprite;
         d.position.set(o.x, o.y);
-        d.scale.set(o.scale_x, o.scale_y);
+        d.scale.set(o.scale_x * scaleMul, o.scale_y * scaleMul);
         d.rotation = o.rotation;
         d.zIndex = o.z_index;
         ensureRoundedSpriteMask(d);
@@ -3103,7 +3177,7 @@ void main()
         const sh = shadowsByObjectIdRef.current.get(o.id);
         if (sh) {
           sh.position.set(o.x, o.y);
-          sh.scale.set(o.scale_x, o.scale_y);
+          sh.scale.set(o.scale_x * scaleMul, o.scale_y * scaleMul);
           sh.rotation = o.rotation;
           sh.zIndex = o.z_index - 0.25;
           if (!shadowLiftByObjectIdRef.current.has(o.id)) {
@@ -3121,7 +3195,7 @@ void main()
         const sh = new PIXI.Graphics();
         sh.eventMode = "none";
         sh.position.set(o.x, o.y);
-        sh.scale.set(o.scale_x, o.scale_y);
+        sh.scale.set(o.scale_x * scaleMul, o.scale_y * scaleMul);
         sh.rotation = o.rotation;
         sh.zIndex = o.z_index - 0.25;
         (sh as any).__objectId = o.id;
@@ -3134,7 +3208,7 @@ void main()
         sp.cursor = "move";
         sp.anchor.set(0.5);
         sp.position.set(o.x, o.y);
-        sp.scale.set(o.scale_x, o.scale_y);
+        sp.scale.set(o.scale_x * scaleMul, o.scale_y * scaleMul);
         sp.rotation = o.rotation;
         sp.zIndex = o.z_index;
         (sp as any).__objectId = o.id;

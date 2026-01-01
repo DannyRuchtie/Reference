@@ -48,6 +48,8 @@ struct MigrationSettings {
 struct AiSettings {
   provider: Option<String>, // "local_station" | "huggingface"
   endpoint: Option<String>,
+  #[serde(alias = "hfToken")]
+  hf_token: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -322,6 +324,25 @@ fn spawn_next_server(
         .map(|s| s.as_str())
         .unwrap_or("http://127.0.0.1:2020"),
     )
+    // Optional: HF endpoint/token (used by the bundled worker; safe to expose to local server too).
+    .env(
+      "HF_ENDPOINT_URL",
+      settings
+        .ai
+        .as_ref()
+        .and_then(|a| a.endpoint.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or(""),
+    )
+    .env(
+      "HF_TOKEN",
+      settings
+        .ai
+        .as_ref()
+        .and_then(|a| a.hf_token.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or(""),
+    )
     // Ensure the Node server and the Python worker (if used) can share the same DB file.
     .env("MOONDREAM_DB_PATH", data_dir.join("moondream.sqlite3"))
     .stdin(Stdio::null())
@@ -365,6 +386,12 @@ fn spawn_worker(
     .and_then(|a| a.provider.as_ref())
     .cloned()
     .unwrap_or_else(|| "local_station".to_string());
+  let hf_token = settings
+    .ai
+    .as_ref()
+    .and_then(|a| a.hf_token.as_ref())
+    .cloned()
+    .unwrap_or_else(|| "".to_string());
 
   let mut cmd = Command::new(worker);
   cmd
@@ -372,6 +399,9 @@ fn spawn_worker(
     .env("MOONDREAM_DB_PATH", db_path)
     .env("MOONDREAM_PROVIDER", provider)
     .env("MOONDREAM_ENDPOINT", endpoint)
+    // HF provider expects these env vars (safe to set even when provider != huggingface).
+    .env("HF_ENDPOINT_URL", settings.ai.as_ref().and_then(|a| a.endpoint.as_ref()).cloned().unwrap_or_default())
+    .env("HF_TOKEN", hf_token)
     .env("MOONDREAM_POLL_SECONDS", std::env::var("MOONDREAM_POLL_SECONDS").unwrap_or_else(|_| "1.0".to_string()))
     // Retry old failures automatically (useful if Station wasn't running on first launch).
     .env("MOONDREAM_RETRY_FAILED", std::env::var("MOONDREAM_RETRY_FAILED").unwrap_or_else(|_| "1".to_string()))

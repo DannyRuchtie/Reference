@@ -16,6 +16,8 @@ type Settings = {
   ai: {
     provider: AiProvider;
     endpoint?: string;
+    // Redacted on GET; only included on PUT when user changes it.
+    hfToken?: string | null;
   };
 };
 
@@ -40,10 +42,18 @@ export default function SettingsClient() {
     storage: { mode: "local" },
     ai: { provider: "local_station" },
   });
-  const [defaults, setDefaults] = useState<{ icloudDir: string | null; moondreamEndpoint: string }>({
+  const [defaults, setDefaults] = useState<{
+    icloudDir: string | null;
+    moondreamEndpoint: string;
+    hfEndpointUrl: string;
+    hfTokenSet: boolean;
+  }>({
     icloudDir: null,
     moondreamEndpoint: "http://127.0.0.1:2020",
+    hfEndpointUrl: "https://api-inference.huggingface.co/models/moondream/moondream3-preview",
+    hfTokenSet: false,
   });
+  const [hfTokenInput, setHfTokenInput] = useState("");
 
   const effectiveIcloudPath = useMemo(() => {
     if (settings.storage.mode !== "icloud") return null;
@@ -57,7 +67,7 @@ export default function SettingsClient() {
       if (!res.ok) return;
       const data = (await res.json()) as {
         settings: Settings;
-        defaults: { icloudDir: string | null; moondreamEndpoint: string };
+        defaults: { icloudDir: string | null; moondreamEndpoint: string; hfEndpointUrl: string; hfTokenSet: boolean };
       };
       if (cancelled) return;
       setSettings(data.settings);
@@ -121,11 +131,15 @@ export default function SettingsClient() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const saveAll = async () => {
+  const saveAll = async (opts?: { clearHfToken?: boolean }) => {
     setSaving(true);
     setSaved(false);
     setError(null);
     try {
+      const provider = settings.ai.provider;
+      const endpoint = settings.ai.endpoint?.trim() || undefined;
+      const hfToken = hfTokenInput.trim();
+
       const payload: Settings = {
         storage: {
           mode: settings.storage.mode,
@@ -135,8 +149,13 @@ export default function SettingsClient() {
               : undefined,
         },
         ai: {
-          provider: settings.ai.provider,
-          endpoint: settings.ai.endpoint?.trim() || undefined,
+          provider,
+          endpoint,
+          ...(opts?.clearHfToken
+            ? { hfToken: null }
+            : hfToken.length > 0
+              ? { hfToken }
+              : {}),
         },
       };
       const res = await fetch("/api/settings", {
@@ -146,6 +165,13 @@ export default function SettingsClient() {
       });
       if (!res.ok) throw new Error("Failed to save settings");
       setSaved(true);
+      if (opts?.clearHfToken) {
+        setDefaults((d) => ({ ...d, hfTokenSet: false }));
+        setHfTokenInput("");
+      } else if (hfToken.length > 0) {
+        setDefaults((d) => ({ ...d, hfTokenSet: true }));
+        setHfTokenInput("");
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -283,20 +309,107 @@ export default function SettingsClient() {
 
           <div className="mt-4 space-y-3">
             <div>
-              <div className="mb-1 text-xs text-zinc-500">AI endpoint</div>
+              <div className="mb-2 text-xs text-zinc-500">Provider</div>
+              <div className="space-y-2">
+                <label className="flex items-start gap-3 rounded-lg border border-zinc-900 bg-zinc-950 px-3 py-3">
+                  <input
+                    type="radio"
+                    name="ai_provider"
+                    checked={settings.ai.provider === "local_station"}
+                    onChange={() => setSettings((s) => ({ ...s, ai: { ...s.ai, provider: "local_station" } }))}
+                    className="mt-1"
+                  />
+                  <div>
+                    <div className="text-sm text-zinc-200">Local Station</div>
+                    <div className="text-xs text-zinc-500">Uses Moondream Station running on your machine.</div>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3 rounded-lg border border-zinc-900 bg-zinc-950 px-3 py-3">
+                  <input
+                    type="radio"
+                    name="ai_provider"
+                    checked={settings.ai.provider === "huggingface"}
+                    onChange={() =>
+                      setSettings((s) => ({
+                        ...s,
+                        ai: {
+                          ...s.ai,
+                          provider: "huggingface",
+                          endpoint: (s.ai.endpoint || "").trim() ? s.ai.endpoint : defaults.hfEndpointUrl,
+                        },
+                      }))
+                    }
+                    className="mt-1"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-zinc-200">Hugging Face Endpoint</div>
+                    <div className="text-xs text-zinc-500">
+                      Uses a Hugging Face Inference Endpoint (requires endpoint URL + API token).
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-1 text-xs text-zinc-500">
+                {settings.ai.provider === "huggingface" ? "Hugging Face endpoint URL" : "Moondream Station endpoint"}
+              </div>
               <input
                 value={settings.ai.endpoint ?? ""}
                 onChange={(e) => setSettings((s) => ({ ...s, ai: { ...s.ai, endpoint: e.target.value } }))}
-                placeholder={defaults.moondreamEndpoint}
+                placeholder={
+                  settings.ai.provider === "huggingface"
+                    ? defaults.hfEndpointUrl
+                    : defaults.moondreamEndpoint
+                }
                 className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 outline-none"
               />
               <div className="mt-2 text-[11px] text-zinc-600">
-                Examples: <span className="text-zinc-400">http://127.0.0.1:2021/v1</span> or{" "}
-                <span className="text-zinc-400">http://127.0.0.1:2020</span> (the worker accepts both and normalizes).
-                If <span className="text-zinc-400">localhost</span> gives issues, prefer{" "}
-                <span className="text-zinc-400">127.0.0.1</span>.
+                {settings.ai.provider === "huggingface" ? (
+                  <>Paste the full endpoint URL for your Hugging Face Inference Endpoint.</>
+                ) : (
+                  <>
+                    Examples: <span className="text-zinc-400">http://127.0.0.1:2021/v1</span> or{" "}
+                    <span className="text-zinc-400">http://127.0.0.1:2020</span> (the worker accepts both and
+                    normalizes). If <span className="text-zinc-400">localhost</span> gives issues, prefer{" "}
+                    <span className="text-zinc-400">127.0.0.1</span>.
+                  </>
+                )}
               </div>
             </div>
+
+            {settings.ai.provider === "huggingface" ? (
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <div className="text-xs text-zinc-500">Hugging Face API token</div>
+                  {defaults.hfTokenSet ? <div className="text-[11px] text-zinc-500">Token saved</div> : null}
+                </div>
+                <input
+                  value={hfTokenInput}
+                  onChange={(e) => setHfTokenInput(e.target.value)}
+                  placeholder={defaults.hfTokenSet ? "•••••••••• (leave blank to keep existing)" : "hf_..."}
+                  type="password"
+                  autoComplete="off"
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 outline-none"
+                />
+                <div className="mt-2 text-[11px] text-zinc-600">
+                  Stored locally in your app settings. The worker uses it as a Bearer token.
+                </div>
+                {defaults.hfTokenSet ? (
+                  <div className="mt-2">
+                    <button
+                      disabled={!loaded || saving}
+                      onClick={() => saveAll({ clearHfToken: true })}
+                      className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
+                    >
+                      Clear saved token
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="flex items-center gap-3">
               <button
