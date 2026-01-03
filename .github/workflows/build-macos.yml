@@ -1,0 +1,81 @@
+name: Build macOS (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install web deps
+        run: |
+          cd web
+          npm ci
+
+      - name: Install desktop deps
+        run: |
+          cd desktop
+          npm ci
+
+      - name: Bundle Node into the app (required by desktop build)
+        run: |
+          mkdir -p desktop/src-tauri/resources/bin
+          cp "$(which node)" desktop/src-tauri/resources/bin/node
+          chmod +x desktop/src-tauri/resources/bin/node
+
+      - name: Build desktop app
+        run: |
+          cd desktop
+          npm run build
+
+      - name: Package outputs (.app.zip + .dmg)
+        run: |
+          APP="desktop/src-tauri/target/release/bundle/macos/Reference.app"
+          OUTDIR="dist"
+          mkdir -p "$OUTDIR"
+
+          if [ ! -d "$APP" ]; then
+            echo "Missing app bundle at: $APP"
+            ls -la desktop/src-tauri/target/release/bundle || true
+            exit 1
+          fi
+
+          # Zip the .app for artifact upload (preserves macOS metadata)
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUTDIR/Reference.app.zip"
+
+          # Optional: create a simple DMG (reliable)
+          hdiutil create -volname "Reference" -srcfolder "$APP" -ov -format UDZO "$OUTDIR/Reference.dmg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-unsigned
+          if-no-files-found: error
+          path: |
+            dist/Reference.app.zip
+            dist/Reference.dmg
+
