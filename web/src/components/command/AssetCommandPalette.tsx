@@ -219,7 +219,13 @@ export function AssetCommandPalette(props: {
               return (
                 <Command.Item
                   key={a.id}
-                  value={`${a.original_name} ${a.ai_caption ?? ""}`}
+                  value={`${a.original_name} ${a.ai_caption ?? ""} ${a.manual_notes ?? ""} ${(() => {
+                    try {
+                      return a.manual_tags ? (JSON.parse(a.manual_tags) as string[]).join(" ") : "";
+                    } catch {
+                      return "";
+                    }
+                  })()}`}
                   onSelect={() => {
                     setOpen(false);
                     if (onCanvas) props.onFocusObjectId(onCanvas);

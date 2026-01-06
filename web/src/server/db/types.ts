@@ -65,12 +65,21 @@ export type AssetSegmentRow = {
   updated_at: string;
 };
 
+export type AssetManualMetadataRow = {
+  asset_id: string;
+  notes: string | null;
+  tags: string | null; // JSON array of strings
+  updated_at: string;
+};
+
 export type AssetWithAi = AssetRow & {
   ai_caption: string | null;
   ai_tags_json: string | null;
   ai_status: AssetAiRow["status"] | null;
   ai_model_version: string | null;
   ai_updated_at: string | null;
+  manual_notes: string | null;
+  manual_tags: string | null; // JSON array of strings
 };
 
 export type CanvasObjectRow = {

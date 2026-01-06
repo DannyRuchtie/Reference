@@ -1,7 +1,7 @@
 import { z } from "zod";
 import fs from "node:fs";
 
-import { deleteProject, getProject, renameProject } from "@/server/db/projects";
+import { getAdapter } from "@/server/db/getAdapter";
 import { projectDir } from "@/server/storage/paths";
 
 export const runtime = "nodejs";
@@ -11,7 +11,8 @@ export async function GET(
   ctx: { params: Promise<{ projectId: string }> }
 ) {
   const { projectId } = await ctx.params;
-  const project = getProject(projectId);
+  const adapter = getAdapter();
+  const project = await adapter.getProject(projectId);
   if (!project) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
@@ -31,9 +32,11 @@ export async function PATCH(
   const parsed = RenameBody.safeParse(json);
   if (!parsed.success) return Response.json({ error: "Invalid body" }, { status: 400 });
 
-  const updated = renameProject(projectId, parsed.data.name);
-  if (!updated) return Response.json({ error: "Not found" }, { status: 404 });
-  return Response.json({ project: updated });
+  const adapter = getAdapter();
+  const ok = await adapter.updateProject(projectId, parsed.data.name);
+  if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
+  const project = await adapter.getProject(projectId);
+  return Response.json({ project });
 }
 
 export async function DELETE(
@@ -41,7 +44,8 @@ export async function DELETE(
   ctx: { params: Promise<{ projectId: string }> }
 ) {
   const { projectId } = await ctx.params;
-  const ok = deleteProject(projectId);
+  const adapter = getAdapter();
+  const ok = await adapter.deleteProject(projectId);
   if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
 
   // Best-effort disk cleanup: remove the project folder (assets + thumbs).

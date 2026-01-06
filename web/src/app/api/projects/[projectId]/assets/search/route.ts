@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-import { getProject } from "@/server/db/projects";
-import { searchAssets, searchAssetsAdvanced } from "@/server/db/search";
+import { getAdapter } from "@/server/db/getAdapter";
 
 export const runtime = "nodejs";
 
@@ -16,7 +15,8 @@ export async function GET(
   ctx: { params: Promise<{ projectId: string }> }
 ) {
   const { projectId } = await ctx.params;
-  const project = getProject(projectId);
+  const adapter = getAdapter();
+  const project = await adapter.getProject(projectId);
   if (!project) return Response.json({ error: "Not found" }, { status: 404 });
 
   const url = new URL(req.url);
@@ -35,8 +35,8 @@ export async function GET(
 
   const assets =
     mode === "fts"
-      ? searchAssets({ projectId, query, limit })
-      : await searchAssetsAdvanced({ projectId, query, limit, mode });
+      ? await adapter.searchAssets({ projectId, query, limit })
+      : await adapter.searchAssetsAdvanced({ projectId, query, limit, mode });
   return Response.json({ projectId, assets });
 }
 

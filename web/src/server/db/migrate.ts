@@ -146,6 +146,31 @@ CREATE TABLE IF NOT EXISTS project_sync (
 );
 `;
 
+const MIGRATION_007 = `PRAGMA foreign_keys = ON;
+
+-- Manual metadata table for user-editable notes and tags
+CREATE TABLE IF NOT EXISTS asset_manual_metadata (
+  asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+  notes TEXT,
+  tags TEXT, -- JSON array of strings
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Rebuild asset_search FTS5 table to include manual metadata
+-- Note: FTS5 tables cannot be altered, so we must drop and recreate
+DROP TABLE IF EXISTS asset_search;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS asset_search USING fts5(
+  asset_id UNINDEXED,
+  project_id UNINDEXED,
+  original_name,
+  caption, -- AI caption
+  tags, -- AI tags
+  manual_notes, -- Manual notes
+  manual_tags -- Manual tags
+);
+`;
+
 export function ensureMigrations(db: Database) {
   db.pragma("foreign_keys = ON");
 
@@ -226,6 +251,60 @@ export function ensureMigrations(db: Database) {
     try {
       db.exec(sql);
       db.exec("PRAGMA user_version = 6");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+    current = 6;
+  }
+
+  if (current < 7) {
+    const sql = MIGRATION_007;
+    db.exec("BEGIN");
+    try {
+      db.exec(sql);
+      // Re-index all existing assets after rebuilding FTS5 table
+      const assets = db.prepare(`
+        SELECT a.id, a.project_id, a.original_name,
+               ai.caption, ai.tags_json
+        FROM assets a
+        LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+        WHERE a.deleted_at IS NULL
+      `).all() as Array<{
+        id: string;
+        project_id: string;
+        original_name: string;
+        caption: string | null;
+        tags_json: string | null;
+      }>;
+
+      const insertStmt = db.prepare(`
+        INSERT INTO asset_search (asset_id, project_id, original_name, caption, tags, manual_notes, manual_tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const asset of assets) {
+        let tags: string[] = [];
+        try {
+          tags = asset.tags_json ? (JSON.parse(asset.tags_json) as string[]) : [];
+        } catch {
+          tags = [];
+        }
+        const tagsText = tags.filter(Boolean).join(" ");
+
+        insertStmt.run(
+          asset.id,
+          asset.project_id,
+          asset.original_name,
+          asset.caption ?? "",
+          tagsText,
+          "", // manual_notes
+          "" // manual_tags
+        );
+      }
+
+      db.exec("PRAGMA user_version = 7");
       db.exec("COMMIT");
     } catch (err) {
       db.exec("ROLLBACK");

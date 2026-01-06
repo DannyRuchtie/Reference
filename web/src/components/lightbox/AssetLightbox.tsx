@@ -76,6 +76,22 @@ export function AssetLightbox(props: {
 
   const tags = useMemo(() => safeParseTagsJson(asset.ai_tags_json), [asset.ai_tags_json]);
 
+  // Manual metadata state
+  const [manualNotes, setManualNotes] = useState<string>(asset.manual_notes ?? "");
+  const [manualTags, setManualTags] = useState<string[]>(() => {
+    if (!asset.manual_tags) return [];
+    try {
+      return JSON.parse(asset.manual_tags) as string[];
+    } catch {
+      return [];
+    }
+  });
+  const [editingNotes, setEditingNotes] = useState<string>("");
+  const [editingTags, setEditingTags] = useState<string[]>([]);
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [tagInput, setTagInput] = useState("");
+
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [imageFit, setImageFit] = useState<{
     // Pixel rect of the drawn image inside the <img> element box (object-fit: contain)
@@ -202,6 +218,70 @@ export function AssetLightbox(props: {
       cancelled = true;
     };
   }, [asset.id, projectId]);
+
+  useEffect(() => {
+    // Load manual metadata when asset changes
+    setManualNotes(asset.manual_notes ?? "");
+    try {
+      setManualTags(asset.manual_tags ? (JSON.parse(asset.manual_tags) as string[]) : []);
+    } catch {
+      setManualTags([]);
+    }
+    setIsEditing(false);
+  }, [asset.id, asset.manual_notes, asset.manual_tags]);
+
+  const startEditing = () => {
+    setEditingNotes(manualNotes);
+    setEditingTags([...manualTags]);
+    setIsEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setIsEditing(false);
+    setEditingNotes(manualNotes);
+    setEditingTags([...manualTags]);
+    setTagInput("");
+  };
+
+  const saveMetadata = async () => {
+    setIsSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/assets/${asset.id}/metadata`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          notes: editingNotes.trim() || null,
+          tags: editingTags.length > 0 ? editingTags : null,
+        }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error(errorData.error || errorData.message || "Failed to save");
+      }
+      const data = (await res.json()) as { notes: string | null; tags: string[] | null };
+      setManualNotes(data.notes ?? "");
+      setManualTags(data.tags ?? []);
+      setIsEditing(false);
+      setTagInput("");
+    } catch (err) {
+      console.error("Failed to save metadata:", err);
+      alert(`Failed to save metadata: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const addTag = () => {
+    const trimmed = tagInput.trim();
+    if (trimmed && !editingTags.includes(trimmed)) {
+      setEditingTags([...editingTags, trimmed]);
+      setTagInput("");
+    }
+  };
+
+  const removeTag = (tagToRemove: string) => {
+    setEditingTags(editingTags.filter((t) => t !== tagToRemove));
+  };
 
   const recomputeImageFit = useCallback(() => {
     const img = imgRef.current;
@@ -549,6 +629,116 @@ export function AssetLightbox(props: {
                   </div>
                 </section>
               ) : null}
+
+              <section>
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs font-medium text-zinc-300">Manual Metadata</div>
+                  {!isEditing ? (
+                    <button
+                      onClick={startEditing}
+                      className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-zinc-200 hover:bg-black/50"
+                    >
+                      Edit
+                    </button>
+                  ) : null}
+                </div>
+                <div className="mt-2 space-y-3">
+                  <div>
+                    <div className="mb-1 text-xs text-zinc-500">Notes</div>
+                    {isEditing ? (
+                      <textarea
+                        value={editingNotes}
+                        onChange={(e) => setEditingNotes(e.target.value)}
+                        placeholder="Add notes..."
+                        className="w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-white/20"
+                        rows={4}
+                      />
+                    ) : (
+                      <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-sm text-zinc-100 min-h-[60px]">
+                        {manualNotes || <span className="text-zinc-600">No notes</span>}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="mb-1 text-xs text-zinc-500">Tags</div>
+                    {isEditing ? (
+                      <div className="space-y-2">
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={tagInput}
+                            onChange={(e) => setTagInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                addTag();
+                              }
+                            }}
+                            placeholder="Add tag..."
+                            className="flex-1 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-white/20"
+                          />
+                          <button
+                            onClick={addTag}
+                            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-200 hover:bg-black/50"
+                          >
+                            Add
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {editingTags.map((tag) => (
+                            <span
+                              key={tag}
+                              className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/20 px-2 py-1 text-xs text-zinc-200"
+                            >
+                              {tag}
+                              <button
+                                onClick={() => removeTag(tag)}
+                                className="hover:text-zinc-100"
+                                aria-label={`Remove ${tag}`}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {manualTags.length > 0 ? (
+                          manualTags.map((tag) => (
+                            <span
+                              key={tag}
+                              className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-xs text-zinc-200"
+                            >
+                              {tag}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-xs text-zinc-600">No tags</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {isEditing ? (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={saveMetadata}
+                        disabled={isSaving}
+                        className="rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-200 hover:bg-black/50 disabled:opacity-50"
+                      >
+                        {isSaving ? "Saving..." : "Save"}
+                      </button>
+                      <button
+                        onClick={cancelEditing}
+                        disabled={isSaving}
+                        className="rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-200 hover:bg-black/50 disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
 
               <section>
                 <div className="text-xs font-medium text-zinc-300">File</div>

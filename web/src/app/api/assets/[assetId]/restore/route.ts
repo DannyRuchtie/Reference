@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { getAssetAny, restoreAsset, upsertAssetSearchRowForAsset } from "@/server/db/assets";
+import { getAdapter } from "@/server/db/getAdapter";
+import { readAppSettings } from "@/server/appConfig";
 
 export const runtime = "nodejs";
 
@@ -35,7 +36,9 @@ export async function POST(
   ctx: { params: Promise<{ assetId: string }> }
 ) {
   const { assetId } = await ctx.params;
-  const asset = getAssetAny(assetId);
+  const adapter = getAdapter();
+  const settings = readAppSettings();
+  const asset = await adapter.getAssetAny(assetId);
   if (!asset) return Response.json({ error: "Not found" }, { status: 404 });
 
   // Idempotent.
@@ -43,23 +46,27 @@ export async function POST(
     return Response.json({ ok: true, restored: true });
   }
 
-  // Best-effort move files back.
-  if (asset.trashed_storage_path && asset.storage_path && fs.existsSync(asset.trashed_storage_path)) {
-    safeMove(asset.trashed_storage_path, asset.storage_path);
-  }
-  if (asset.trashed_thumb_path && asset.thumb_path && fs.existsSync(asset.trashed_thumb_path)) {
-    safeMove(asset.trashed_thumb_path, asset.thumb_path);
+  // Best-effort move files back (local mode only).
+  if (settings.mode === "local") {
+    if (asset.trashed_storage_path && asset.storage_path && fs.existsSync(asset.trashed_storage_path)) {
+      safeMove(asset.trashed_storage_path, asset.storage_path);
+    }
+    if (asset.trashed_thumb_path && asset.thumb_path && fs.existsSync(asset.trashed_thumb_path)) {
+      safeMove(asset.trashed_thumb_path, asset.thumb_path);
+    }
   }
 
   let ok = false;
   try {
-    ok = restoreAsset(assetId);
+    ok = await adapter.restoreAsset(assetId);
   } catch (e) {
     // Most likely: unique constraint (e.g. you re-uploaded the same file while it was trashed).
     return Response.json({ ok: false, error: (e as Error).message }, { status: 409 });
   }
-  if (ok) {
-    // Re-add to search index.
+
+  // Re-add to search index (local mode only - cloud handles this automatically).
+  if (ok && settings.mode === "local") {
+    const { upsertAssetSearchRowForAsset } = await import("@/server/db/assets");
     upsertAssetSearchRowForAsset(assetId);
   }
 

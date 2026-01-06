@@ -10,6 +10,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.8.0",
+    "@supabase/supabase-js": "^2.89.0",
     "better-sqlite3": "^12.5.0",
     "busboy": "^1.6.0",
     "cmdk": "^1.1.1",

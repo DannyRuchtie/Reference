@@ -30,15 +30,10 @@ export async function GET() {
   const settings = readAppSettings();
 
   // Prefer env (desktop sets MOONDREAM_ENDPOINT from saved settings).
-  // Otherwise, probe common local endpoints and pick the first reachable.
+  // Otherwise, use default endpoint.
   const envEndpoint = (process.env.MOONDREAM_ENDPOINT || "").trim();
-  const candidate = "http://localhost:2023/v1";
-  const fallback = "http://127.0.0.1:2020";
-  const moondreamEndpoint = envEndpoint
-    ? envEndpoint
-    : (await endpointReachable(candidate, 600))
-      ? candidate
-      : fallback;
+  const defaultEndpoint = "http://localhost:2023/v1";
+  const moondreamEndpoint = envEndpoint || defaultEndpoint;
 
   return Response.json({
     settings: {

@@ -83,12 +83,20 @@ export function upsertAssetAi(args: {
     } catch {
       tags = [];
     }
+    let manualTags: string[] = [];
+    try {
+      manualTags = joined.manual_tags ? (JSON.parse(joined.manual_tags) as string[]) : [];
+    } catch {
+      manualTags = [];
+    }
     upsertAssetSearchRow({
       projectId: joined.project_id,
       assetId: joined.id,
       originalName: joined.original_name,
       caption: joined.ai_caption,
       tags,
+      manualNotes: joined.manual_notes,
+      manualTags,
     });
   }
 }
@@ -110,9 +118,12 @@ export function listAssets(args: {
         ai.tags_json AS ai_tags_json,
         ai.status AS ai_status,
         ai.model_version AS ai_model_version,
-        ai.updated_at AS ai_updated_at
+        ai.updated_at AS ai_updated_at,
+        mm.notes AS manual_notes,
+        mm.tags AS manual_tags
       FROM assets a
       LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+      LEFT JOIN asset_manual_metadata mm ON mm.asset_id = a.id
       WHERE a.project_id = ? AND a.deleted_at IS NULL
       ORDER BY a.created_at DESC
       LIMIT ? OFFSET ?`
@@ -131,9 +142,12 @@ export function getAsset(assetId: string): AssetWithAi | null {
           ai.tags_json AS ai_tags_json,
           ai.status AS ai_status,
           ai.model_version AS ai_model_version,
-          ai.updated_at AS ai_updated_at
+          ai.updated_at AS ai_updated_at,
+          mm.notes AS manual_notes,
+          mm.tags AS manual_tags
         FROM assets a
         LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+        LEFT JOIN asset_manual_metadata mm ON mm.asset_id = a.id
         WHERE a.id = ? AND a.deleted_at IS NULL`
       )
       .get(assetId) as AssetWithAi | undefined) ?? null
@@ -151,9 +165,12 @@ export function getAssetAny(assetId: string): AssetWithAi | null {
           ai.tags_json AS ai_tags_json,
           ai.status AS ai_status,
           ai.model_version AS ai_model_version,
-          ai.updated_at AS ai_updated_at
+          ai.updated_at AS ai_updated_at,
+          mm.notes AS manual_notes,
+          mm.tags AS manual_tags
         FROM assets a
         LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+        LEFT JOIN asset_manual_metadata mm ON mm.asset_id = a.id
         WHERE a.id = ?`
       )
       .get(assetId) as AssetWithAi | undefined) ?? null
@@ -213,12 +230,20 @@ export function upsertAssetSearchRowForAsset(assetId: string) {
   } catch {
     tags = [];
   }
+  let manualTags: string[] = [];
+  try {
+    manualTags = a.manual_tags ? (JSON.parse(a.manual_tags) as string[]) : [];
+  } catch {
+    manualTags = [];
+  }
   upsertAssetSearchRow({
     projectId: a.project_id,
     assetId: a.id,
     originalName: a.original_name,
     caption: a.ai_caption,
     tags,
+    manualNotes: a.manual_notes,
+    manualTags,
   });
 }
 

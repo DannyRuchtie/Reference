@@ -1,6 +1,4 @@
-import { getProject, listProjects } from "@/server/db/projects";
-import { listAssets } from "@/server/db/assets";
-import { getCanvasObjects, getProjectSync, getProjectView } from "@/server/db/canvas";
+import { getAdapter } from "@/server/db/getAdapter";
 import { clearLastOpenedProjectId, setLastOpenedProjectId } from "@/server/db/appState";
 import { ProjectWorkspace } from "@/components/workspace/ProjectWorkspace";
 import type { Metadata } from "next";
@@ -13,7 +11,8 @@ export async function generateMetadata(
   props: { params: Promise<{ projectId: string }> }
 ): Promise<Metadata> {
   const { projectId } = await props.params;
-  const project = getProject(projectId);
+  const adapter = getAdapter();
+  const project = await adapter.getProject(projectId);
   return {
     title: project?.name ? project.name : "Project",
   };
@@ -21,10 +20,11 @@ export async function generateMetadata(
 
 export default async function ProjectPage(props: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await props.params;
+  const adapter = getAdapter();
 
-  const project = getProject(projectId);
+  const project = await adapter.getProject(projectId);
   if (!project) {
-    const projects = listProjects();
+    const projects = await adapter.listProjects();
     const fallback = projects[0]?.id ?? null;
     if (fallback) {
       // Avoid getting stuck on a deleted project (desktop launch redirects via last_project_id).
@@ -58,10 +58,10 @@ export default async function ProjectPage(props: { params: Promise<{ projectId: 
   // (Stored in SQLite, so it survives desktop port changes across launches.)
   setLastOpenedProjectId(projectId);
 
-  const assets = listAssets({ projectId, limit: 200, offset: 0 });
-  const objects = getCanvasObjects(projectId);
-  const view = getProjectView(projectId);
-  const sync = getProjectSync(projectId);
+  const assets = await adapter.listAssets({ projectId, limit: 200, offset: 0 });
+  const objects = await adapter.getCanvasObjects(projectId);
+  const view = await adapter.getProjectView(projectId);
+  const sync = await adapter.getProjectSync(projectId);
 
   return (
     <ProjectWorkspace

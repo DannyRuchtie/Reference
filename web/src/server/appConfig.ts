@@ -6,6 +6,7 @@ import { z } from "zod";
 import { repoDataDir } from "@/server/storage/paths";
 
 export const AppSettingsSchema = z.object({
+  mode: z.enum(["local", "cloud"]).default("local"),
   ai: z
     .object({
       // Moondream Station endpoint (e.g. http://127.0.0.1:2020 or http://127.0.0.1:2021/v1)
@@ -39,6 +40,14 @@ export function readAppSettings(): AppSettings {
     // ignore
   }
   return AppSettingsSchema.parse({});
+}
+
+export function getSupabaseConfig() {
+  // Supabase configuration from environment variables
+  // These should be set at deployment time
+  const url = process.env.SUPABASE_URL || "https://xinteoymytyvihiofypz.supabase.co";
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || "sb_publishable_S5bVL6HB-3MC2qMOCb41Zg_1EkN3nOn";
+  return { url, publishableKey };
 }
 
 export function writeAppSettings(next: AppSettings) {

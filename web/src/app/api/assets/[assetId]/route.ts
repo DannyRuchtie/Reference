@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { countCanvasObjectsReferencingAsset, getAsset, getAssetAny, trashAsset } from "@/server/db/assets";
+import { getAdapter } from "@/server/db/getAdapter";
+import { readAppSettings } from "@/server/appConfig";
 import { projectTrashAssetsDir, projectTrashThumbsDir } from "@/server/storage/paths";
 
 export const runtime = "nodejs";
@@ -11,7 +12,8 @@ export async function GET(
   ctx: { params: Promise<{ assetId: string }> }
 ) {
   const { assetId } = await ctx.params;
-  const asset = getAsset(assetId);
+  const adapter = getAdapter();
+  const asset = await adapter.getAsset(assetId);
   if (!asset) return Response.json({ error: "Not found" }, { status: 404 });
   return Response.json({ asset });
 }
@@ -38,7 +40,9 @@ export async function DELETE(
   ctx: { params: Promise<{ assetId: string }> }
 ) {
   const { assetId } = await ctx.params;
-  const asset = getAssetAny(assetId);
+  const adapter = getAdapter();
+  const settings = readAppSettings();
+  const asset = await adapter.getAssetAny(assetId);
   if (!asset) return Response.json({ error: "Not found" }, { status: 404 });
 
   // Idempotency: already trashed.
@@ -48,36 +52,43 @@ export async function DELETE(
 
   // Safety: don't allow deleting an asset while it's still referenced by canvas objects.
   // This prevents the next canvas save from failing FK validation.
-  const refs = countCanvasObjectsReferencingAsset(assetId);
-  if (refs > 0) {
-    return Response.json(
-      { error: "Asset is still referenced by canvas objects", refs },
-      { status: 409 }
-    );
+  // Note: For cloud mode, we'd need to add a count method to the adapter
+  // For now, skip this check in cloud mode
+  if (settings.mode === "local") {
+    const { countCanvasObjectsReferencingAsset } = await import("@/server/db/assets");
+    const refs = countCanvasObjectsReferencingAsset(assetId);
+    if (refs > 0) {
+      return Response.json(
+        { error: "Asset is still referenced by canvas objects", refs },
+        { status: 409 }
+      );
+    }
   }
 
   const deletedAt = new Date().toISOString();
 
-  // Best-effort disk move into per-project trash (DB is still the source of truth).
-  const trashStorageDir = projectTrashAssetsDir(asset.project_id);
-  const trashThumbDir = projectTrashThumbsDir(asset.project_id);
-
   let trashedStoragePath: string | null = null;
   let trashedThumbPath: string | null = null;
 
-  if (asset.storage_path && fs.existsSync(asset.storage_path)) {
-    const base = path.basename(asset.storage_path);
-    const dest = path.join(trashStorageDir, `${asset.id}-${base}`);
-    if (safeMove(asset.storage_path, dest)) trashedStoragePath = dest;
+  // Only move files in local mode
+  if (settings.mode === "local") {
+    const trashStorageDir = projectTrashAssetsDir(asset.project_id);
+    const trashThumbDir = projectTrashThumbsDir(asset.project_id);
+
+    if (asset.storage_path && fs.existsSync(asset.storage_path)) {
+      const base = path.basename(asset.storage_path);
+      const dest = path.join(trashStorageDir, `${asset.id}-${base}`);
+      if (safeMove(asset.storage_path, dest)) trashedStoragePath = dest;
+    }
+
+    if (asset.thumb_path && fs.existsSync(asset.thumb_path)) {
+      const base = path.basename(asset.thumb_path);
+      const dest = path.join(trashThumbDir, `${asset.id}-${base}`);
+      if (safeMove(asset.thumb_path, dest)) trashedThumbPath = dest;
+    }
   }
 
-  if (asset.thumb_path && fs.existsSync(asset.thumb_path)) {
-    const base = path.basename(asset.thumb_path);
-    const dest = path.join(trashThumbDir, `${asset.id}-${base}`);
-    if (safeMove(asset.thumb_path, dest)) trashedThumbPath = dest;
-  }
-
-  const ok = trashAsset({
+  const ok = await adapter.trashAsset({
     assetId,
     deletedAt,
     trashedStoragePath,

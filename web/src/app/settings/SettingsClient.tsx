@@ -4,8 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { ROUTE_FADE_MS, dispatchRouteFadeEnd, dispatchRouteFadeStart } from "@/lib/routeFade";
+import { CloudAuthSection } from "./CloudAuthSection";
+import { CloudModeProvider } from "@/components/auth/CloudModeProvider";
 
 type Settings = {
+  mode?: "local" | "cloud";
   ai: {
     endpoint?: string;
   };
@@ -32,7 +35,7 @@ type StationStatus = {
   logPath: string;
 };
 
-export default function SettingsClient() {
+function SettingsClientInner() {
   const router = useRouter();
   const sp = useSearchParams();
   const projectId = sp?.get("projectId") ?? null;
@@ -57,6 +60,7 @@ export default function SettingsClient() {
   const [stationErr, setStationErr] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<Settings>({
+    mode: "local",
     ai: {},
   });
   const [defaults, setDefaults] = useState<{
@@ -210,6 +214,7 @@ export default function SettingsClient() {
       const endpoint = settings.ai.endpoint?.trim() || undefined;
 
       const payload: Settings = {
+        ...settings,
         ai: {
           endpoint,
         },
@@ -228,7 +233,7 @@ export default function SettingsClient() {
     }
   };
 
-  return (
+  const content = (
     <div className="fixed inset-0 overflow-auto text-zinc-50">
       {/* Backdrop */}
       <div
@@ -255,6 +260,113 @@ export default function SettingsClient() {
           >
             Back
           </button>
+        </div>
+
+        <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+          <div className="text-sm font-medium">Mode</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            Choose between local storage (SQLite) or Cloud (Pro) storage (Supabase). Cloud (Pro) requires authentication.
+          </div>
+
+          {error ? <div className="mt-4 text-sm text-red-400">{error}</div> : null}
+          {saved ? (
+            <div className="mt-4 rounded-lg border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-sm text-amber-200">
+              Settings saved. Restart the app to apply mode changes.
+            </div>
+          ) : null}
+
+          <div className="mt-4 space-y-4">
+            <div>
+              <div className="mb-2 text-xs text-zinc-500">Storage Mode</div>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="mode"
+                    value="local"
+                    checked={settings.mode === "local"}
+                    onChange={(e) => setSettings((s) => ({ ...s, mode: e.target.value as "local" | "cloud" }))}
+                    className="text-zinc-200"
+                  />
+                  <span className="text-sm text-zinc-200">Local</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="mode"
+                    value="cloud"
+                    checked={settings.mode === "cloud"}
+                    onChange={(e) => setSettings((s) => ({ ...s, mode: e.target.value as "local" | "cloud" }))}
+                    className="text-zinc-200"
+                  />
+                  <span className="text-sm text-zinc-200">Cloud (Pro)</span>
+                </label>
+              </div>
+            </div>
+
+            {settings.mode === "cloud" ? <CloudAuthSection /> : null}
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                disabled={!loaded || saving}
+                onClick={async () => {
+                  setSaving(true);
+                  setSaved(false);
+                  setError(null);
+                  try {
+                    const res = await fetch("/api/settings", {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(settings),
+                    });
+                    if (!res.ok) throw new Error("Failed to save settings");
+                    setSaved(true);
+                    // If switching to local mode, navigate to clear auth wrapper
+                    if (settings.mode === "local") {
+                      setTimeout(() => {
+                        // Use window.location.href instead of reload to avoid performance measurement issues
+                        window.location.href = "/settings";
+                      }, 500);
+                    }
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save Settings"}
+              </button>
+              {settings.mode === "cloud" && (
+                <button
+                  onClick={async () => {
+                    const newSettings = { ...settings, mode: "local" as const };
+                    setSettings(newSettings);
+                    // Save immediately when switching to local
+                    try {
+                      const res = await fetch("/api/settings", {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(newSettings),
+                      });
+                      if (res.ok) {
+                        // Use window.location instead of router to avoid performance measurement issues
+                        setTimeout(() => {
+                          window.location.href = "/settings";
+                        }, 300);
+                      }
+                    } catch (e) {
+                      console.error("Failed to switch to local mode:", e);
+                    }
+                  }}
+                  className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900"
+                >
+                  Switch to Local
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
@@ -467,6 +579,21 @@ export default function SettingsClient() {
       </div>
     </div>
   );
+
+  // Wrap with CloudModeProvider when Cloud (Pro) is selected (even before saving)
+  if (settings.mode === "cloud") {
+    return (
+      <CloudModeProvider isCloudMode={true}>
+        {content}
+      </CloudModeProvider>
+    );
+  }
+
+  return content;
+}
+
+export default function SettingsClient() {
+  return <SettingsClientInner />;
 }
 
 

@@ -1,8 +1,6 @@
 import { z } from "zod";
 
-import { getProject } from "@/server/db/projects";
-import { getAsset } from "@/server/db/assets";
-import { getAssetSegment, listAssetSegments } from "@/server/db/ai";
+import { getAdapter } from "@/server/db/getAdapter";
 
 export const runtime = "nodejs";
 
@@ -15,10 +13,11 @@ export async function GET(
   ctx: { params: Promise<{ projectId: string; assetId: string }> }
 ) {
   const { projectId, assetId } = await ctx.params;
-  const project = getProject(projectId);
+  const adapter = getAdapter();
+  const project = await adapter.getProject(projectId);
   if (!project) return Response.json({ error: "Not found" }, { status: 404 });
 
-  const asset = getAsset(assetId);
+  const asset = await adapter.getAsset(assetId);
   if (!asset || asset.project_id !== projectId) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
@@ -31,20 +30,24 @@ export async function GET(
   // - When term is provided, return that segment (existing behavior used by the command palette highlight).
   // - When term is omitted/empty, return all cached segments for this asset.
   if (!termRaw) {
-    const segments = listAssetSegments(assetId).map((s) => ({
-      tag: s.tag,
-      svg: s.svg,
-      bboxJson: s.bbox_json,
-      updatedAt: s.updated_at,
-    }));
-    return Response.json({ projectId, assetId, segments });
+    const segments = await adapter.listAssetSegments(assetId);
+    return Response.json({
+      projectId,
+      assetId,
+      segments: segments.map((s) => ({
+        tag: s.tag,
+        svg: s.svg,
+        bboxJson: s.bbox_json,
+        updatedAt: s.updated_at,
+      })),
+    });
   }
 
   const parsed = SegmentsQuery.safeParse({ term: termRaw });
   if (!parsed.success) return Response.json({ error: "Invalid query" }, { status: 400 });
 
   const term = parsed.data.term;
-  const seg = getAssetSegment({ assetId, tag: term });
+  const seg = await adapter.getAssetSegment({ assetId, tag: term });
   if (!seg) return Response.json({ error: "Not found" }, { status: 404 });
 
   return Response.json({

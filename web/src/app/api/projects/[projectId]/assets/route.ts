@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-import { getProject } from "@/server/db/projects";
-import { listAssets } from "@/server/db/assets";
+import { getAdapter } from "@/server/db/getAdapter";
 
 export const runtime = "nodejs";
 
@@ -15,7 +14,8 @@ export async function GET(
   ctx: { params: Promise<{ projectId: string }> }
 ) {
   const { projectId } = await ctx.params;
-  const project = getProject(projectId);
+  const adapter = getAdapter();
+  const project = await adapter.getProject(projectId);
   if (!project) return Response.json({ error: "Not found" }, { status: 404 });
 
   const url = new URL(req.url);
@@ -27,7 +27,7 @@ export async function GET(
     return Response.json({ error: "Invalid query" }, { status: 400 });
   }
 
-  const assets = listAssets({
+  const assets = await adapter.listAssets({
     projectId,
     limit: parsed.data.limit,
     offset: parsed.data.offset,

@@ -22,14 +22,17 @@ export function upsertAssetSearchRow(args: {
   originalName: string;
   caption?: string | null;
   tags?: string[] | null;
+  manualNotes?: string | null;
+  manualTags?: string[] | null;
 }) {
   const db = getDb();
   const tagsText = (args.tags ?? []).filter(Boolean).join(" ");
+  const manualTagsText = (args.manualTags ?? []).filter(Boolean).join(" ");
 
   const deleteStmt = db.prepare("DELETE FROM asset_search WHERE asset_id = ?");
   const insertStmt = db.prepare(
-    `INSERT INTO asset_search (asset_id, project_id, original_name, caption, tags)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO asset_search (asset_id, project_id, original_name, caption, tags, manual_notes, manual_tags)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction(() => {
@@ -39,7 +42,9 @@ export function upsertAssetSearchRow(args: {
       args.projectId,
       args.originalName,
       args.caption ?? "",
-      tagsText
+      tagsText,
+      args.manualNotes ?? "",
+      manualTagsText
     );
   });
   tx();
@@ -73,9 +78,12 @@ export function searchAssets(args: {
           ai.tags_json AS ai_tags_json,
           ai.status AS ai_status,
           ai.model_version AS ai_model_version,
-          ai.updated_at AS ai_updated_at
+          ai.updated_at AS ai_updated_at,
+          mm.notes AS manual_notes,
+          mm.tags AS manual_tags
         FROM assets a
         LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+        LEFT JOIN asset_manual_metadata mm ON mm.asset_id = a.id
         WHERE a.project_id = ? AND a.deleted_at IS NULL
         ORDER BY a.created_at DESC
         LIMIT ?`
@@ -91,10 +99,13 @@ export function searchAssets(args: {
         ai.tags_json AS ai_tags_json,
         ai.status AS ai_status,
         ai.model_version AS ai_model_version,
-        ai.updated_at AS ai_updated_at
+        ai.updated_at AS ai_updated_at,
+        mm.notes AS manual_notes,
+        mm.tags AS manual_tags
       FROM asset_search s
       JOIN assets a ON a.id = s.asset_id
       LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+      LEFT JOIN asset_manual_metadata mm ON mm.asset_id = a.id
       WHERE s.project_id = ? AND a.deleted_at IS NULL AND asset_search MATCH ?
       ORDER BY rank
       LIMIT ?`
@@ -169,9 +180,12 @@ function getAssetsByIdsPreserveOrder(assetIds: string[]): AssetWithAi[] {
         ai.tags_json AS ai_tags_json,
         ai.status AS ai_status,
         ai.model_version AS ai_model_version,
-        ai.updated_at AS ai_updated_at
+        ai.updated_at AS ai_updated_at,
+        mm.notes AS manual_notes,
+        mm.tags AS manual_tags
       FROM assets a
       LEFT JOIN asset_ai ai ON ai.asset_id = a.id
+      LEFT JOIN asset_manual_metadata mm ON mm.asset_id = a.id
       WHERE a.deleted_at IS NULL AND a.id IN (${placeholders})
       ORDER BY CASE a.id ${orderCase} ELSE 999999 END`
     )
