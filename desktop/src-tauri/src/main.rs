@@ -25,32 +25,12 @@ struct ServerState {
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 struct AppSettings {
-  storage: Option<StorageSettings>,
   ai: Option<AiSettings>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct StorageSettings {
-  mode: Option<String>, // "local" | "icloud"
-  #[serde(alias = "icloudPath")]
-  icloud_path: Option<String>,
-  migration: Option<MigrationSettings>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct MigrationSettings {
-  from: String,
-  to: String,
-  #[serde(alias = "requestedAt")]
-  requested_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AiSettings {
-  provider: Option<String>, // "local_station" | "huggingface"
   endpoint: Option<String>,
-  #[serde(alias = "hfToken")]
-  hf_token: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -283,23 +263,6 @@ fn resource_path(app: &tauri::AppHandle, rel: &str) -> Option<PathBuf> {
     .map(|d| d.join("resources").join(rel))
 }
 
-fn default_icloud_dir() -> Option<PathBuf> {
-  let home = std::env::var("HOME").ok()?;
-  let root = PathBuf::from(home)
-    .join("Library")
-    .join("Mobile Documents")
-    .join("com~apple~CloudDocs");
-
-  // Branding change: default to "Reference", but keep compatibility with existing installs
-  // that may already have data under the previous folder name.
-  let new = root.join("Reference");
-  let old = root.join("Moondream");
-  if old.exists() && !new.exists() {
-    return Some(old);
-  }
-  Some(new)
-}
-
 fn read_settings(config_root: &PathBuf) -> AppSettings {
   let p = config_root.join("settings.json");
   let data = std::fs::read_to_string(p);
@@ -315,122 +278,6 @@ fn write_settings(config_root: &PathBuf, settings: &AppSettings) {
   if let Ok(s) = serde_json::to_string_pretty(settings) {
     let _ = std::fs::write(p, s);
   }
-}
-
-fn is_dir_empty(p: &PathBuf) -> bool {
-  match std::fs::read_dir(p) {
-    Ok(mut it) => it.next().is_none(),
-    Err(_) => true,
-  }
-}
-
-fn copy_dir_all(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
-  std::fs::create_dir_all(to)?;
-  for entry in std::fs::read_dir(from)? {
-    let entry = entry?;
-    let ft = entry.file_type()?;
-    let src = entry.path();
-    let dst = to.join(entry.file_name());
-    if ft.is_dir() {
-      copy_dir_all(&src, &dst)?;
-    } else if ft.is_file() {
-      std::fs::create_dir_all(dst.parent().unwrap_or(to))?;
-      std::fs::copy(&src, &dst)?;
-    }
-  }
-  Ok(())
-}
-
-fn move_dir(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
-  // Fast path: same volume rename.
-  if std::fs::rename(from, to).is_ok() {
-    return Ok(());
-  }
-  // Fallback: recursive copy + delete.
-  copy_dir_all(from, to)?;
-  std::fs::remove_dir_all(from)?;
-  Ok(())
-}
-
-fn apply_pending_migration(config_root: &PathBuf, settings: &mut AppSettings) -> Option<PathBuf> {
-  let mig = settings.storage.as_ref().and_then(|s| s.migration.as_ref())?;
-  let from = PathBuf::from(mig.from.clone());
-  let to = PathBuf::from(mig.to.clone());
-  if from == to {
-    // Nothing to do.
-    if let Some(st) = settings.storage.as_mut() {
-      st.migration = None;
-    }
-    write_settings(config_root, settings);
-    return None;
-  }
-
-  // If source doesn't exist, clear and continue.
-  if !from.exists() {
-    if let Some(st) = settings.storage.as_mut() {
-      st.migration = None;
-    }
-    write_settings(config_root, settings);
-    return None;
-  }
-
-  // If destination exists and is not empty, back it up before moving in.
-  if to.exists() && !is_dir_empty(&to) {
-    let ts = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .unwrap_or_else(|_| Duration::from_secs(0))
-      .as_secs();
-    let name = to
-      .file_name()
-      .and_then(|s| s.to_str())
-      .unwrap_or("data")
-      .to_string();
-    let backup = to
-      .parent()
-      .unwrap_or(config_root)
-      .join(format!("{}-backup-{}", name, ts));
-    let _ = std::fs::rename(&to, &backup);
-  }
-
-  if let Some(parent) = to.parent() {
-    let _ = std::fs::create_dir_all(parent);
-  }
-
-  match move_dir(&from, &to) {
-    Ok(()) => {
-      if let Some(st) = settings.storage.as_mut() {
-        st.migration = None;
-      }
-      write_settings(config_root, settings);
-      None
-    }
-    Err(_) => {
-      // Migration failed; keep using the old location for this run so the library isn't "missing".
-      Some(from)
-    }
-  }
-}
-
-fn resolve_data_dir(config_root: &PathBuf, settings: &AppSettings) -> PathBuf {
-  let mode = settings
-    .storage
-    .as_ref()
-    .and_then(|s| s.mode.as_deref())
-    .unwrap_or("local")
-    .to_lowercase();
-
-  if mode == "icloud" {
-    let p = settings
-      .storage
-      .as_ref()
-      .and_then(|s| s.icloud_path.as_ref())
-      .map(PathBuf::from)
-      .or_else(default_icloud_dir);
-    if let Some(p) = p {
-      return p;
-    }
-  }
-  config_root.join("data")
 }
 
 fn spawn_next_server(
@@ -484,16 +331,7 @@ fn spawn_next_server(
     .env("MOONDREAM_DATA_DIR", &data_dir)
     .env("MOONDREAM_APP_CONFIG_DIR", config_root)
     .env("MOONDREAM_SETTINGS_PATH", config_root.join("settings.json"))
-    // Pass AI config through so the UI (and server routes, if needed) can read it.
-    .env(
-      "MOONDREAM_PROVIDER",
-      settings
-        .ai
-        .as_ref()
-        .and_then(|a| a.provider.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("local_station"),
-    )
+    // Pass AI config through so the server can compute sensible defaults.
     .env(
       "MOONDREAM_ENDPOINT",
       settings
@@ -502,25 +340,6 @@ fn spawn_next_server(
         .and_then(|a| a.endpoint.as_ref())
         .map(|s| s.as_str())
         .unwrap_or("http://localhost:2023/v1"),
-    )
-    // Optional: HF endpoint/token (used by the bundled worker; safe to expose to local server too).
-    .env(
-      "HF_ENDPOINT_URL",
-      settings
-        .ai
-        .as_ref()
-        .and_then(|a| a.endpoint.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or(""),
-    )
-    .env(
-      "HF_TOKEN",
-      settings
-        .ai
-        .as_ref()
-        .and_then(|a| a.hf_token.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or(""),
     )
     // Ensure the Node server and the Python worker (if used) can share the same DB file.
     .env("MOONDREAM_DB_PATH", data_dir.join("moondream.sqlite3"))
@@ -559,28 +378,12 @@ fn spawn_worker(
     .and_then(|a| a.endpoint.as_ref())
     .cloned()
     .unwrap_or_else(|| "http://localhost:2023/v1".to_string());
-  let provider = settings
-    .ai
-    .as_ref()
-    .and_then(|a| a.provider.as_ref())
-    .cloned()
-    .unwrap_or_else(|| "local_station".to_string());
-  let hf_token = settings
-    .ai
-    .as_ref()
-    .and_then(|a| a.hf_token.as_ref())
-    .cloned()
-    .unwrap_or_else(|| "".to_string());
 
   let mut cmd = Command::new(worker);
   cmd
     .env("PYTHONUNBUFFERED", "1")
     .env("MOONDREAM_DB_PATH", db_path)
-    .env("MOONDREAM_PROVIDER", provider)
     .env("MOONDREAM_ENDPOINT", endpoint)
-    // HF provider expects these env vars (safe to set even when provider != huggingface).
-    .env("HF_ENDPOINT_URL", settings.ai.as_ref().and_then(|a| a.endpoint.as_ref()).cloned().unwrap_or_default())
-    .env("HF_TOKEN", hf_token)
     .env("MOONDREAM_POLL_SECONDS", std::env::var("MOONDREAM_POLL_SECONDS").unwrap_or_else(|_| "1.0".to_string()))
     // Default: do NOT auto-retry "failed" forever (prevents tight loops if a file is missing on disk).
     // Transient Station/network errors are already re-queued to "pending" by the worker.
@@ -843,9 +646,7 @@ fn main() {
       std::fs::create_dir_all(&config_root)?;
 
       let settings = read_settings(&config_root);
-      let mut settings = settings;
-      let override_data_dir = apply_pending_migration(&config_root, &mut settings);
-      let data_dir = override_data_dir.unwrap_or_else(|| resolve_data_dir(&config_root, &settings));
+      let data_dir = config_root.join("data");
       std::fs::create_dir_all(&data_dir)?;
 
       let child = spawn_next_server(&handle, port, &config_root, &data_dir, &settings)?;

@@ -5,7 +5,7 @@ High‑performance, Figma‑like canvas for building layouts by dropping images 
 - **Frontend**: Next.js + PixiJS (WebGL)
 - **DB**: SQLite (with FTS5 search)
 - **Storage**: local filesystem under `data/`
-- **AI (optional)**: local endpoint or Hugging Face endpoint (worker)
+- **AI (optional)**: local endpoint (worker)
 
 <img src="screen-4.jpg" alt="Workspace selection and transforms" width="860" />
 
@@ -122,11 +122,6 @@ Environment variables (examples):
 # Local station
 export MOONDREAM_PROVIDER=local_station
 export MOONDREAM_ENDPOINT=http://127.0.0.1:2020
-
-# Hugging Face endpoint (generic adapter)
-# export MOONDREAM_PROVIDER=huggingface
-# export HF_ENDPOINT_URL="https://your-hf-endpoint"
-# export HF_TOKEN="..."
 ```
 
 ## Repository structure
@@ -243,7 +238,6 @@ flowchart LR
   API --> FS[("Filesystem: data/projects/{projectId}/...")];
   W["worker/moondream_worker.py"] --> DB;
   W -->|HTTP| MS["Station (127.0.0.1:2020)"];
-  W -->|optional HTTP| HF["Hugging Face Endpoint"];
 ```
 
 

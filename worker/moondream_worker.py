@@ -205,65 +205,14 @@ class LocalStationProvider(MoondreamProvider):
         return "moondream_station"
 
 
-class HuggingFaceProvider(MoondreamProvider):
-    def __init__(self, endpoint_url: str, token: str):
-        self.endpoint_url = endpoint_url
-        self.token = token
-
-    def caption(self, image_path: str, length: str = "normal") -> str:
-        # This is intentionally generic; different HF endpoints have different schemas.
-        # You can adapt this to your specific endpoint contract.
-        with open(image_path, "rb") as f:
-            img_bytes = f.read()
-
-        headers = {"Authorization": f"Bearer {self.token}"}
-        r = requests.post(self.endpoint_url, headers=headers, data=img_bytes, timeout=180)
-        if r.status_code >= 400:
-            raise ProviderError(f"hf failed: {r.status_code} {r.text}")
-        data: Any = r.json()
-
-        # Best-effort parsing:
-        if isinstance(data, dict):
-            caption = (
-                data.get("caption")
-                or data.get("generated_text")
-                or data.get("text")
-                or data.get("answer")
-                or ""
-            )
-            caption = str(caption).strip()
-        elif isinstance(data, list) and data and isinstance(data[0], dict):
-            caption = str(data[0].get("generated_text") or data[0].get("text") or "").strip()
-        else:
-            caption = str(data).strip()
-
-        if not caption:
-            caption = json.dumps(data)
-        return caption
-
-    def detect(self, image_path: str, obj: str) -> Any:
-        raise ProviderError("detect is not supported for the huggingface provider in this worker")
-
-    def segment(self, image_path: str, obj: str) -> Any:
-        raise ProviderError("segment is not supported for the huggingface provider in this worker")
-
-    def query(self, image_path: str, question: str) -> str:
-        raise ProviderError("query is not supported for the huggingface provider in this worker")
-
-    def model_version(self) -> str:
-        return "huggingface_endpoint"
-
-
 def get_provider() -> MoondreamProvider:
     provider = os.getenv("MOONDREAM_PROVIDER", "local_station")
     if provider == "local_station":
         endpoint = os.getenv("MOONDREAM_ENDPOINT", "http://127.0.0.1:2020")
         return LocalStationProvider(endpoint=endpoint)
-    if provider == "huggingface":
-        url = os.environ["HF_ENDPOINT_URL"]
-        token = os.environ["HF_TOKEN"]
-        return HuggingFaceProvider(endpoint_url=url, token=token)
-    raise RuntimeError(f"Unknown MOONDREAM_PROVIDER={provider}")
+    raise RuntimeError(
+        f"Unsupported MOONDREAM_PROVIDER={provider}. Hugging Face integration has been removed; use MOONDREAM_PROVIDER=local_station."
+    )
 
 
 def connect(db_path: str) -> sqlite3.Connection:

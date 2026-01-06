@@ -5,33 +5,13 @@ import { z } from "zod";
 
 import { repoDataDir } from "@/server/storage/paths";
 
-const StorageMode = z.enum(["local", "icloud"]);
-const AiProvider = z.enum(["local_station", "huggingface"]);
-
 export const AppSettingsSchema = z.object({
-  storage: z
-    .object({
-      mode: StorageMode.default("local"),
-      icloudPath: z.string().min(1).optional(),
-      migration: z
-        .object({
-          from: z.string().min(1),
-          to: z.string().min(1),
-          requestedAt: z.string().min(1),
-        })
-        .optional(),
-    })
-    .default({ mode: "local" }),
   ai: z
     .object({
-      provider: AiProvider.default("local_station"),
-      // For local_station: http://127.0.0.1:2020 or http://127.0.0.1:2021/v1
+      // Moondream Station endpoint (e.g. http://127.0.0.1:2020 or http://127.0.0.1:2021/v1)
       endpoint: z.string().min(1).optional(),
-      // Hugging Face Inference Endpoint token (Bearer).
-      // This is stored locally in settings.json (desktop: Application Support).
-      hfToken: z.string().optional().nullable(),
     })
-    .default({ provider: "local_station" }),
+    .default({}),
 });
 
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
@@ -47,26 +27,6 @@ export function settingsFilePath() {
   const p = (process.env.MOONDREAM_SETTINGS_PATH || "").trim();
   if (p) return path.resolve(p);
   return path.join(configRootDir(), "settings.json");
-}
-
-export function defaultIcloudDir() {
-  const home = process.env.HOME || os.homedir() || "";
-  if (!home) return null;
-  const root = path.join(
-    home,
-    "Library",
-    "Mobile Documents",
-    "com~apple~CloudDocs"
-  );
-  const next = path.join(root, "Reference");
-  const old = path.join(root, "Moondream");
-  // Branding change: default to "Reference", but keep compatibility with existing installs.
-  if (fs.existsSync(old) && !fs.existsSync(next)) return old;
-  return next;
-}
-
-export function defaultLocalDataDir() {
-  return path.join(configRootDir(), "data");
 }
 
 export function readAppSettings(): AppSettings {

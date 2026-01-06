@@ -136,7 +136,7 @@ CREATE INDEX IF NOT EXISTS assets_deleted_at_idx ON assets(deleted_at);
 
 const MIGRATION_006 = `PRAGMA foreign_keys = ON;
 
--- Track per-project revision counters so clients can detect stale writes (helps multi-device + iCloud scenarios).
+-- Track per-project revision counters so clients can detect stale writes (helps multi-device scenarios).
 CREATE TABLE IF NOT EXISTS project_sync (
   project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
   canvas_rev INTEGER NOT NULL DEFAULT 0,

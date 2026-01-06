@@ -923,7 +923,7 @@ export function PixiWorkspace(props: {
         serverCanvasRevRef.current = rev;
         void patchProjectDraft(projectId, { serverCanvasRev: rev }).catch(() => {});
       }
-      setSyncConflict("Synced latest board from disk (iCloud).");
+      setSyncConflict("Synced latest board from disk.");
       clearSyncConflictSoon();
     } catch {
       // ignore
@@ -955,7 +955,7 @@ export function PixiWorkspace(props: {
         serverViewRevRef.current = rev;
         void patchProjectDraft(projectId, { serverViewRev: rev }).catch(() => {});
       }
-      setSyncConflict("Synced latest view from disk (iCloud).");
+      setSyncConflict("Synced latest view from disk.");
       clearSyncConflictSoon();
     } catch {
       // ignore
@@ -976,7 +976,7 @@ export function PixiWorkspace(props: {
         body: JSON.stringify({ objects, baseCanvasRev: serverCanvasRevRef.current ?? 0 }),
       });
       if (res.status === 409) {
-        setSyncConflict("Board is newer on iCloud. Reloading latest…");
+        setSyncConflict("Board is newer on disk. Reloading latest…");
         await syncCanvasFromServer();
         return;
       }
@@ -1018,7 +1018,7 @@ export function PixiWorkspace(props: {
         body: JSON.stringify({ ...view, baseViewRev: serverViewRevRef.current ?? 0 }),
       });
       if (res.status === 409) {
-        setSyncConflict("View is newer on iCloud. Reloading latest…");
+        setSyncConflict("View is newer on disk. Reloading latest…");
         await syncViewFromServer();
         return;
       }

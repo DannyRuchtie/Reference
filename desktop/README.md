@@ -5,7 +5,7 @@ This folder adds a **standalone desktop app** wrapper around the existing Next.j
 - Bundling the built Next.js server output (`next.config.ts` uses `output: "standalone"`)
 - Launching it locally on `127.0.0.1:<random_port>` at app start
 - Loading the UI in a Tauri webview
-- Storing all data under a writable per-user directory via `MOONDREAM_DATA_DIR` (configurable via in-app Settings)
+- Storing all data under a writable per-user directory via `MOONDREAM_DATA_DIR`
 
 ## Prereqs (local machine)
 
@@ -130,7 +130,7 @@ By default (Local mode), all local-first data lives under:
 - `.../projects/<projectId>/assets/` (images)
 - `.../projects/<projectId>/thumbs/` (thumbnails)
 
-### Settings + iCloud Drive storage
+### Settings
 
 The desktop app has a Settings screen at:
 
@@ -141,16 +141,6 @@ Settings are stored at:
 ```text
 ~/Library/Application Support/com.moondream.desktop/settings.json
 ```
-
-If you switch Storage to **iCloud Drive**, the app will (on next launch) store the entire data folder (DB + assets + thumbs) under:
-
-```text
-~/Library/Mobile Documents/com~apple~CloudDocs/Reference/
-```
-
-Compatibility note: if you previously used the old iCloud folder, the app will continue using it unless you explicitly migrate.
-
-Important: iCloud Drive sync is file-based. Avoid opening the app on multiple Macs at the same time when using iCloud storage (SQLite WAL files can conflict).
 
 ## Bundled Python worker (auto-start)
 
